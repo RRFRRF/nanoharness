@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
+import fs from 'fs';
 import { PassThrough } from 'stream';
 
 // Sentinel markers must match container-runner.ts
@@ -50,6 +51,7 @@ vi.mock('fs', async () => {
       existsSync: vi.fn(() => false),
       mkdirSync: vi.fn(),
       writeFileSync: vi.fn(),
+      appendFileSync: vi.fn(),
       readFileSync: vi.fn(() => ''),
       readdirSync: vi.fn(() => []),
       statSync: vi.fn(() => ({ isDirectory: () => false })),
@@ -302,5 +304,31 @@ describe('container-runner timeout behavior', () => {
         newSessionId: 'session-789',
       }),
     );
+  });
+
+  it('writes a live stream log while the container is still running', async () => {
+    const resultPromise = runContainerAgent(testGroup, testInput, () => {});
+
+    fakeProc.stdout.push('hello from stdout\n');
+    fakeProc.stderr.push('hello from stderr\n');
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(fs.appendFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('.stream.log'),
+      expect.stringContaining('[stdout] hello from stdout'),
+    );
+    expect(fs.appendFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('.stream.log'),
+      expect.stringContaining('[stderr] hello from stderr'),
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'Done',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
   });
 });

@@ -70,6 +70,10 @@ interface VolumeMount {
   readonly: boolean;
 }
 
+function escapeLogChunk(chunk: string): string {
+  return chunk.replace(/\r\n/g, '\n');
+}
+
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
@@ -337,18 +341,35 @@ export async function runContainerAgent(
     'Container mount configuration',
   );
 
+  const logsDir = path.join(groupDir, 'logs');
+  fs.mkdirSync(logsDir, { recursive: true });
+  const logTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const streamLogFile = path.join(
+    logsDir,
+    `container-${logTimestamp}.stream.log`,
+  );
+  fs.writeFileSync(
+    streamLogFile,
+    [
+      '=== Live Container Stream ===',
+      `Timestamp: ${new Date().toISOString()}`,
+      `Group: ${group.name}`,
+      `Container: ${containerName}`,
+      `Session ID: ${input.sessionId || 'new'}`,
+      '',
+    ].join('\n') + '\n',
+  );
+
   logger.info(
     {
       group: group.name,
       containerName,
       mountCount: mounts.length,
       isMain: input.isMain,
+      streamLogFile,
     },
     'Spawning container agent',
   );
-
-  const logsDir = path.join(groupDir, 'logs');
-  fs.mkdirSync(logsDir, { recursive: true });
 
   return new Promise((resolve) => {
     const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
@@ -362,6 +383,20 @@ export async function runContainerAgent(
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
+    const appendStreamLog = (source: 'stdout' | 'stderr', chunk: string) => {
+      try {
+        fs.appendFileSync(
+          streamLogFile,
+          `[${new Date().toISOString()}] [${source}] ${escapeLogChunk(chunk)}`,
+        );
+      } catch (err) {
+        logger.warn(
+          { group: group.name, streamLogFile, err },
+          'Failed to append live container stream log',
+        );
+      }
+    };
+
     container.stdin.write(JSON.stringify(input));
     container.stdin.end();
 
@@ -373,6 +408,7 @@ export async function runContainerAgent(
 
     container.stdout.on('data', (data) => {
       const chunk = data.toString();
+      appendStreamLog('stdout', chunk);
 
       // Always accumulate for logging
       if (!stdoutTruncated) {
@@ -428,6 +464,7 @@ export async function runContainerAgent(
 
     container.stderr.on('data', (data) => {
       const chunk = data.toString();
+      appendStreamLog('stderr', chunk);
       const lines = chunk.trim().split('\n');
       for (const line of lines) {
         if (line) logger.debug({ container: group.folder }, line);
@@ -499,6 +536,14 @@ export async function runContainerAgent(
             `Had Streaming Output: ${hadStreamingOutput}`,
           ].join('\n'),
         );
+        try {
+          fs.appendFileSync(
+            streamLogFile,
+            `\n[${new Date().toISOString()}] [system] Container timed out after ${duration}ms\n`,
+          );
+        } catch {
+          // ignore
+        }
 
         // Timeout after output = idle cleanup, not failure.
         // The agent already sent its response; this is just the
@@ -598,6 +643,14 @@ export async function runContainerAgent(
       }
 
       fs.writeFileSync(logFile, logLines.join('\n'));
+      try {
+        fs.appendFileSync(
+          streamLogFile,
+          `\n[${new Date().toISOString()}] [system] Container closed with code ${code}\n`,
+        );
+      } catch {
+        // ignore
+      }
       logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
 
       if (code !== 0) {

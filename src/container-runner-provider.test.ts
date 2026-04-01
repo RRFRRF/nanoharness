@@ -73,6 +73,7 @@ async function loadRunner(provider: Provider, authMode: AuthMode) {
         existsSync: vi.fn(() => false),
         mkdirSync: vi.fn(),
         writeFileSync: vi.fn(),
+        appendFileSync: vi.fn(),
         readFileSync: vi.fn(() => ''),
         readdirSync: vi.fn(() => []),
         statSync: vi.fn(() => ({ isDirectory: () => false })),
