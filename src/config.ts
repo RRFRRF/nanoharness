@@ -9,10 +9,12 @@ import { readEnvFile } from './env.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
+  'MODEL_PROVIDER',
   'ANTHROPIC_MODEL',
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'OPENAI_MODEL',
   'CLAUDE_CODE_SUBAGENT_MODEL',
 ]);
 
@@ -21,6 +23,8 @@ export const ASSISTANT_NAME =
 export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER ||
     envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
+export const MODEL_PROVIDER =
+  process.env.MODEL_PROVIDER || envConfig.MODEL_PROVIDER || 'anthropic';
 export const ANTHROPIC_MODEL =
   process.env.ANTHROPIC_MODEL || envConfig.ANTHROPIC_MODEL;
 export const ANTHROPIC_DEFAULT_OPUS_MODEL =
@@ -32,6 +36,8 @@ export const ANTHROPIC_DEFAULT_SONNET_MODEL =
 export const ANTHROPIC_DEFAULT_HAIKU_MODEL =
   process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL ||
   envConfig.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+export const OPENAI_MODEL =
+  process.env.OPENAI_MODEL || envConfig.OPENAI_MODEL;
 export const CLAUDE_CODE_SUBAGENT_MODEL =
   process.env.CLAUDE_CODE_SUBAGENT_MODEL ||
   envConfig.CLAUDE_CODE_SUBAGENT_MODEL;

@@ -11,7 +11,7 @@ vi.mock('./logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), debug: vi.fn(), warn: vi.fn() },
 }));
 
-import { startCredentialProxy } from './credential-proxy.js';
+import { detectAuthMode, detectProvider, startCredentialProxy } from './credential-proxy.js';
 
 function makeRequest(
   port: number,
@@ -71,9 +71,14 @@ describe('credential-proxy', () => {
   });
 
   async function startProxy(env: Record<string, string>): Promise<number> {
-    Object.assign(mockEnv, env, {
-      ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
-    });
+    const provider = env.MODEL_PROVIDER || 'anthropic';
+    Object.assign(
+      mockEnv,
+      env,
+      provider === 'openai'
+        ? { OPENAI_BASE_URL: `http://127.0.0.1:${upstreamPort}` }
+        : { ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}` },
+    );
     proxyServer = await startCredentialProxy(0);
     return (proxyServer.address() as AddressInfo).port;
   }
@@ -188,6 +193,41 @@ describe('credential-proxy', () => {
 
     expect(res.statusCode).toBe(502);
     expect(res.body).toBe('Bad Gateway');
+  });
+
+  it('OpenAI mode injects Authorization bearer token', async () => {
+    proxyPort = await startProxy({
+      MODEL_PROVIDER: 'openai',
+      OPENAI_API_KEY: 'sk-openai-real-key',
+    });
+
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/chat/completions',
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer placeholder',
+        },
+      },
+      '{}',
+    );
+
+    expect(lastUpstreamHeaders['authorization']).toBe(
+      'Bearer sk-openai-real-key',
+    );
+    expect(lastUpstreamHeaders['x-api-key']).toBeUndefined();
+  });
+
+  it('detects provider and auth mode for OpenAI configuration', () => {
+    Object.assign(mockEnv, {
+      MODEL_PROVIDER: 'openai',
+      OPENAI_API_KEY: 'sk-openai-real-key',
+    });
+
+    expect(detectProvider()).toBe('openai');
+    expect(detectAuthMode()).toBe('bearer');
   });
 
   it('retries once on transient upstream socket reset', async () => {

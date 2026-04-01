@@ -47,17 +47,16 @@ ls /workspace/ipc/ 2>/dev/null
 
 Confirm which tool families are available to you:
 
-- **Core:** Bash, Read, Write, Edit, Glob, Grep
-- **Web:** WebSearch, WebFetch
-- **Orchestration:** Task, TaskOutput, TaskStop, TeamCreate, TeamDelete, SendMessage
+- **Core:** execute, read_file, write_file, edit_file, glob, grep
+- **Planning:** task, write_todos
 - **MCP:** mcp__nanoclaw__* (send_message, schedule_task, list_tasks, pause_task, resume_task, cancel_task, update_task, register_group)
 
 ### 4. Container utilities
 
 ```bash
 which agent-browser 2>/dev/null && echo "agent-browser: available" || echo "agent-browser: not installed"
+which playwright-cli 2>/dev/null && echo "playwright-cli: available" || echo "playwright-cli: not installed"
 node --version 2>/dev/null
-claude --version 2>/dev/null
 ```
 
 ### 5. Task snapshot
@@ -93,7 +92,7 @@ Present as a clean, readable message:
 *Container:*
 • agent-browser: ✓ / not installed
 • Node: vXX.X.X
-• Claude Code: vX.X.X
+• playwright-cli: available / not installed
 
 *Scheduled Tasks:*
 • N active tasks / No scheduled tasks

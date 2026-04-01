@@ -19,6 +19,7 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  OPENAI_MODEL,
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -30,7 +31,7 @@ import {
   readonlyMountArgs,
   stopContainer,
 } from './container-runtime.js';
-import { detectAuthMode } from './credential-proxy.js';
+import { detectAuthMode, detectProvider } from './credential-proxy.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
@@ -239,21 +240,32 @@ function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
-  // Route API traffic through the credential proxy (containers never see real secrets)
-  args.push(
-    '-e',
-    `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
-  );
+  const provider = detectProvider();
+  args.push('-e', `MODEL_PROVIDER=${provider}`);
 
-  // Mirror the host's auth method with a placeholder value.
-  // API key mode: SDK sends x-api-key, proxy replaces with real key.
-  // OAuth mode:   SDK exchanges placeholder token for temp API key,
-  //               proxy injects real OAuth token on that exchange request.
-  const authMode = detectAuthMode();
-  if (authMode === 'api-key') {
-    args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+  // Route provider traffic through the credential proxy (containers never see real secrets)
+  if (provider === 'openai') {
+    args.push(
+      '-e',
+      `OPENAI_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
+    );
+    args.push('-e', 'OPENAI_API_KEY=placeholder');
   } else {
-    args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+    args.push(
+      '-e',
+      `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
+    );
+
+    // Mirror the host's auth method with a placeholder value.
+    // API key mode: SDK sends x-api-key, proxy replaces with real key.
+    // OAuth mode:   SDK exchanges placeholder token for temp API key,
+    //               proxy injects real OAuth token on that exchange request.
+    const authMode = detectAuthMode();
+    if (authMode === 'api-key') {
+      args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+    } else {
+      args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+    }
   }
 
   const passthroughEnv = [
@@ -261,7 +273,10 @@ function buildContainerArgs(
     ['ANTHROPIC_DEFAULT_OPUS_MODEL', ANTHROPIC_DEFAULT_OPUS_MODEL],
     ['ANTHROPIC_DEFAULT_SONNET_MODEL', ANTHROPIC_DEFAULT_SONNET_MODEL],
     ['ANTHROPIC_DEFAULT_HAIKU_MODEL', ANTHROPIC_DEFAULT_HAIKU_MODEL],
+    ['OPENAI_MODEL', OPENAI_MODEL],
     ['CLAUDE_CODE_SUBAGENT_MODEL', CLAUDE_CODE_SUBAGENT_MODEL],
+    ['NANOCLAW_HEARTBEAT_MS', process.env.NANOCLAW_HEARTBEAT_MS],
+    ['NANOCLAW_RECURSION_LIMIT', process.env.NANOCLAW_RECURSION_LIMIT],
   ] as const;
   for (const [key, value] of passthroughEnv) {
     if (value) args.push('-e', `${key}=${value}`);

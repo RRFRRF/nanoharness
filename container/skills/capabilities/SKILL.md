@@ -34,11 +34,9 @@ Each directory is an installed skill. The directory name is the skill name (e.g.
 
 ### 2. Available tools
 
-Read the allowed tools from your SDK configuration. You always have access to:
-- **Core:** Bash, Read, Write, Edit, Glob, Grep
-- **Web:** WebSearch, WebFetch
-- **Orchestration:** Task, TaskOutput, TaskStop, TeamCreate, TeamDelete, SendMessage
-- **Other:** TodoWrite, ToolSearch, Skill, NotebookEdit
+Read the allowed tools from your current runtime configuration. You always have access to:
+- **Core:** execute, read_file, write_file, edit_file, glob, grep
+- **Planning:** task, write_todos
 - **MCP:** mcp__nanoclaw__* (messaging, tasks, group management)
 
 ### 3. MCP server tools
@@ -53,7 +51,7 @@ The NanoClaw MCP server exposes these tools (via `mcp__nanoclaw__*` prefix):
 - `update_task` — update an existing task
 - `register_group` — register a new chat/group (main only)
 
-### 4. Container skills (Bash tools)
+### 4. Container skills (execute tools)
 
 Check for executable tools in the container:
 
@@ -81,9 +79,9 @@ Present the report as a clean, readable message. Example:
 (list all found skills)
 
 *Tools:*
-• Core: Bash, Read, Write, Edit, Glob, Grep
-• Web: WebSearch, WebFetch
-• Orchestration: Task, TeamCreate, SendMessage
+• Core: execute, read_file, write_file, edit_file, glob, grep
+• Planning: task, write_todos
+• MCP: send_message, schedule_task, list_tasks, pause/resume/cancel/update_task, register_group
 • MCP: send_message, schedule_task, list_tasks, pause/resume/cancel/update_task, register_group
 
 *Container Tools:*

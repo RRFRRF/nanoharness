@@ -1,7 +1,7 @@
 ---
-name: Web2PRD
+name: web2prd
 description: 当用户需要对一个 Web 应用进行逆向分析、从用户视角自动探索并生成产品需求文档时使用此 skill。使用 playwright-cli 模拟真人浏览，自动截图、分析页面结构、识别功能模块，最终产出 PRD、用户流程图和数据模型。
-allowed-tools: Bash(playwright-cli:*)
+allowed-tools: execute
 dependencies: playwright-cli
 ---
 
@@ -77,7 +77,7 @@ playwright-cli open {url}
 playwright-cli resize 1920 1080
 playwright-cli screenshot --filename=outputs/web2prd/{slug}/screenshots/page-01-home.png
 playwright-cli snapshot --filename=outputs/web2prd/{slug}/pages/page-01-home.yaml
-# 然后 Read outputs/web2prd/{slug}/pages/page-01-home.yaml 分析首页结构
+# 然后 read_file outputs/web2prd/{slug}/pages/page-01-home.yaml 分析首页结构
 ```
 
 分析首页截图和快照 → 识别应用类型 → 读取 `docs/app-types.md` 获取对应探索优先顺序。
@@ -159,20 +159,20 @@ playwright-cli screenshot --filename=outputs/web2prd/{slug}/screenshots/page-{NN
 # 2. 快照保存到磁盘（保存到 pages/，不要内联返回！）
 playwright-cli snapshot --filename=outputs/web2prd/{slug}/pages/page-{NN}-{label}.yaml
 
-# 3. 按需读取快照（只在需要精确元素引用时 Read 文件）
-#    Read outputs/web2prd/{slug}/pages/page-{NN}-{label}.yaml
+# 3. 按需读取快照（只在需要精确元素引用时 read_file 文件）
+#    read_file outputs/web2prd/{slug}/pages/page-{NN}-{label}.yaml
 
 # 4. 记录到 exploration-log.md（见 1.4 持久化协议）
 ```
 
 **关键**：快照始终 `--filename` 存盘，绝不裸调 `playwright-cli snapshot`（裸调会将完整 DOM 打印到 stdout 吃掉 context）。
 
-**快照智能读取**（避免全量 Read 大文件）：
-- 需要找链接/按钮 → `Grep "link\|button" pages/page-{NN}.yaml` 定向搜索
-- 需要找表单字段 → `Grep "textbox\|combobox\|checkbox" pages/page-{NN}.yaml`
-- 需要看页面结构概览 → `Read pages/page-{NN}.yaml` 加 `limit: 80` 只读前 80 行
-- 需要精确定位某个元素的 ref → Grep 元素文本关键词
-- 只有确实需要完整 DOM 时才全量 Read
+**快照智能读取**（避免全量 read_file 大文件）：
+- 需要找链接/按钮 → `grep "link\|button" pages/page-{NN}.yaml` 定向搜索
+- 需要找表单字段 → `grep "textbox\|combobox\|checkbox" pages/page-{NN}.yaml`
+- 需要看页面结构概览 → `read_file pages/page-{NN}.yaml` 加 `limit: 80` 只读前 80 行
+- 需要精确定位某个元素的 ref → grep 元素文本关键词
+- 只有确实需要完整 DOM 时才全量 read_file
 
 **何时需要读快照 vs 只截图**：
 - 只看页面长什么样、记录页面存在 → 截图即可，不读快照
@@ -253,11 +253,11 @@ playwright-cli screenshot --filename=...page-{NN}-empty-search.png
 **统计**: 已访问 2 / 已跳过 1 / 队列剩余 2
 ```
 
-标记 DONE/SKIP 时只需 Edit 替换该行的 `[PENDING]` → `[DONE]` 或 `[SKIP]`，新 URL 直接追加到列表末尾。
+标记 DONE/SKIP 时只需 edit_file 替换该行的 `[PENDING]` → `[DONE]` 或 `[SKIP]`，新 URL 直接追加到列表末尾。
 
 ### 恢复协议
 
-当你感觉丢失了探索上下文（不确定已经访问了哪些页面、队列里还有什么），**立即 Read exploration-log.md**。这个文件包含完整的探索状态：
+当你感觉丢失了探索上下文（不确定已经访问了哪些页面、队列里还有什么），**立即 read_file exploration-log.md**。这个文件包含完整的探索状态：
 - 已探索页面列表 → 知道去过哪里
 - 模板注册表 → 知道哪些模板已见
 - 探索队列 → 知道下一步该去哪里
@@ -282,7 +282,7 @@ playwright-cli screenshot --filename=...page-{NN}-empty-search.png
 1. 点击前快照存盘：`playwright-cli snapshot --filename=...page-{NN}-before.yaml`
 2. 执行点击
 3. 点击后快照存盘：`playwright-cli snapshot --filename=...page-{NN}-after.yaml`
-4. Read 两个文件对比差异
+4. read_file 两个文件对比差异
 5. 新 UI 区域 = 虚拟视图，URL 记为 `{parent_url}#virtual:{action}`
 6. 对虚拟视图执行截图
 
@@ -376,7 +376,7 @@ outputs/web2prd/{slug}/
 ├── prd.md                ← 完整 PRD（含流程图 + 数据模型）
 ├── screenshots/          ← 页面截图（.png）
 │   └── page-{NN}-{label}.png
-└── pages/                ← 页面快照（.yaml，按需 Read）
+└── pages/                ← 页面快照（.yaml，按需 read_file）
     └── page-{NN}-{label}.yaml
 ```
 
@@ -416,10 +416,10 @@ playwright-cli close
 
 | 操作 | 预估消耗 |
 |------|----------|
-| 截图分析（Read .png） | ~200 tokens |
-| 快照按需读取（Read .yaml） | ~300 tokens（仅在需要元素引用时） |
+| 截图分析（read_file .png） | ~200 tokens |
+| 快照按需读取（read_file .yaml） | ~300 tokens（仅在需要元素引用时） |
 | 快照存盘（--filename） | ~0 tokens（不进入 context） |
 | 状态图节点 | ~200 tokens |
 | **每页目标** | **< 500 tokens** |
 
-核心原则：**所有 playwright-cli 输出都存磁盘，按需 Read**。绝不让大块 DOM/快照内联进入 context window。
+核心原则：**所有 playwright-cli 输出都存磁盘，按需 read_file**。绝不让大块 DOM/快照内联进入 context window。

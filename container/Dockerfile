@@ -1,5 +1,5 @@
 # NanoClaw Agent Container
-# Runs Claude Agent SDK in isolated Linux VM with browser automation
+# Runs Deep Agents in an isolated Linux VM with browser automation
 
 FROM node:22-slim
 
@@ -32,7 +32,7 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Install agent tools globally.
 # playwright-cli is included so Web2PRD/playwright skills work out of the box.
-RUN npm install -g agent-browser @anthropic-ai/claude-code @playwright/cli@latest
+RUN npm install -g agent-browser @playwright/cli@latest
 
 # Create app directory
 WORKDIR /app

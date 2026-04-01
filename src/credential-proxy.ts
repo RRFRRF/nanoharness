@@ -22,9 +22,11 @@ import { Agent as HttpsAgent, request as httpsRequest } from 'https';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 
-export type AuthMode = 'api-key' | 'oauth';
+export type Provider = 'anthropic' | 'openai';
+export type AuthMode = 'api-key' | 'oauth' | 'bearer';
 
 export interface ProxyConfig {
+  provider: Provider;
   authMode: AuthMode;
 }
 
@@ -33,18 +35,29 @@ export function startCredentialProxy(
   host = '127.0.0.1',
 ): Promise<Server> {
   const secrets = readEnvFile([
+    'MODEL_PROVIDER',
     'ANTHROPIC_API_KEY',
     'CLAUDE_CODE_OAUTH_TOKEN',
     'ANTHROPIC_AUTH_TOKEN',
     'ANTHROPIC_BASE_URL',
+    'OPENAI_API_KEY',
+    'OPENAI_BASE_URL',
   ]);
 
-  const authMode: AuthMode = secrets.ANTHROPIC_API_KEY ? 'api-key' : 'oauth';
+  const provider = resolveProvider(secrets);
+  const authMode: AuthMode =
+    provider === 'openai'
+      ? 'bearer'
+      : secrets.ANTHROPIC_API_KEY
+        ? 'api-key'
+        : 'oauth';
   const oauthToken =
     secrets.CLAUDE_CODE_OAUTH_TOKEN || secrets.ANTHROPIC_AUTH_TOKEN;
 
   const upstreamUrl = new URL(
-    secrets.ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
+    provider === 'openai'
+      ? secrets.OPENAI_BASE_URL || 'https://api.openai.com/v1'
+      : secrets.ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
   );
   const isHttps = upstreamUrl.protocol === 'https:';
   const makeRequest = isHttps ? httpsRequest : httpRequest;
@@ -70,7 +83,13 @@ export function startCredentialProxy(
         delete headers['keep-alive'];
         delete headers['transfer-encoding'];
 
-        if (authMode === 'api-key') {
+        if (provider === 'openai') {
+          delete headers['authorization'];
+          delete headers['x-api-key'];
+          if (secrets.OPENAI_API_KEY) {
+            headers['authorization'] = `Bearer ${secrets.OPENAI_API_KEY}`;
+          }
+        } else if (authMode === 'api-key') {
           // API key mode: inject x-api-key on every request
           delete headers['x-api-key'];
           headers['x-api-key'] = secrets.ANTHROPIC_API_KEY;
@@ -165,7 +184,10 @@ export function startCredentialProxy(
     });
 
     server.listen(port, host, () => {
-      logger.info({ port, host, authMode }, 'Credential proxy started');
+      logger.info(
+        { port, host, provider, authMode },
+        'Credential proxy started',
+      );
       resolve(server);
     });
 
@@ -173,8 +195,28 @@ export function startCredentialProxy(
   });
 }
 
+function resolveProvider(secrets: Record<string, string>): Provider {
+  if (secrets.MODEL_PROVIDER === 'openai') return 'openai';
+  if (secrets.MODEL_PROVIDER === 'anthropic') return 'anthropic';
+  if (secrets.OPENAI_API_KEY || secrets.OPENAI_BASE_URL) return 'openai';
+  return 'anthropic';
+}
+
+/** Detect which model provider the host is configured for. */
+export function detectProvider(): Provider {
+  const secrets = readEnvFile([
+    'MODEL_PROVIDER',
+    'OPENAI_API_KEY',
+    'OPENAI_BASE_URL',
+  ]);
+  return resolveProvider(secrets);
+}
+
 /** Detect which auth mode the host is configured for. */
 export function detectAuthMode(): AuthMode {
+  const provider = detectProvider();
+  if (provider === 'openai') return 'bearer';
+
   const secrets = readEnvFile(['ANTHROPIC_API_KEY']);
   return secrets.ANTHROPIC_API_KEY ? 'api-key' : 'oauth';
 }

@@ -6,6 +6,7 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
+    "build:agent-runner": "npm --prefix container/agent-runner run build",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "terminal": "node dist/index.js --terminal --terminal-log-level error",
@@ -16,6 +17,7 @@
     "terminal:user:dev": "tsx src/index.ts --terminal --terminal-log-level error",
     "typecheck": "tsc --noEmit",
     "test:core": "vitest run src/container-runner.test.ts src/group-queue.test.ts src/task-scheduler.test.ts src/terminal-channel.test.ts src/credential-proxy.test.ts src/db.test.ts",
+    "test:refactor": "vitest run src/container-runner.test.ts src/container-runner-provider.test.ts src/credential-proxy.test.ts src/config-provider.test.ts",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:fix": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
@@ -26,6 +28,9 @@
     "lint:fix": "eslint src/ --fix",
     "test": "vitest run",
     "verify:affected": "node scripts/verify-affected.mjs",
+    "verify:refactor": "node scripts/verify-refactor.mjs",
+    "smoke:container-build": "node scripts/smoke-container-build.mjs",
+    "smoke:container-agent": "node scripts/smoke-container-agent.mjs",
     "verify:core": "node scripts/verify-core.mjs",
     "test:watch": "vitest"
   },

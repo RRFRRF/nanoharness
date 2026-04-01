@@ -20,6 +20,8 @@ vi.mock('./config.js', () => ({
   DATA_DIR: '/tmp/nanoclaw-test-data',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
+  MODEL_PROVIDER: 'anthropic',
+  OPENAI_MODEL: undefined,
   TIMEZONE: 'America/Los_Angeles',
 }));
 
@@ -31,6 +33,11 @@ vi.mock('./logger.js', () => ({
     warn: vi.fn(),
     error: vi.fn(),
   },
+}));
+
+vi.mock('./credential-proxy.js', () => ({
+  detectAuthMode: vi.fn(() => 'api-key'),
+  detectProvider: vi.fn(() => 'anthropic'),
 }));
 
 // Mock fs
@@ -188,6 +195,54 @@ describe('container-runner timeout behavior', () => {
     expect(result.status).toBe('error');
     expect(result.error).toContain('timed out');
     expect(onOutput).not.toHaveBeenCalled();
+  });
+
+  it('status markers keep a long-running query alive', async () => {
+    const onOutput = vi.fn(async () => {});
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+      event: {
+        type: 'status',
+        text: 'Starting Deep Agents query...',
+        replace: true,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    await vi.advanceTimersByTimeAsync(1820000);
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+      event: {
+        type: 'status',
+        text: 'Still working inside the container. Elapsed 30m 20s.',
+        replace: true,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    await vi.advanceTimersByTimeAsync(1820000);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('success');
+    expect(onOutput).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: expect.objectContaining({
+          type: 'status',
+          text: 'Still working inside the container. Elapsed 30m 20s.',
+        }),
+      }),
+    );
   });
 
   it('normal exit after output resolves as success', async () => {
