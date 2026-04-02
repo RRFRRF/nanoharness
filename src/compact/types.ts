@@ -99,6 +99,16 @@ export const DEFAULT_THRESHOLDS: CompressionThresholds = {
   l4Threshold: 98,
 };
 
+export interface CompactDiagnostics {
+  sessionId?: string;
+  persistArchives: boolean;
+  archiveStoreBacked: boolean;
+  requestedLevel: CompressionLevel;
+  appliedLevel: CompressionLevel;
+  archiveIds: string[];
+  restoredArchiveId?: string;
+}
+
 /**
  * Result of a compaction operation.
  */
@@ -111,6 +121,8 @@ export interface CompactResult {
   stats: CompactStats;
   /** Archive IDs created during compaction (if any) */
   archivedIds?: string[];
+  /** Diagnostics for observability / restore decisions */
+  diagnostics?: CompactDiagnostics;
 }
 
 /**

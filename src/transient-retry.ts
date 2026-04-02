@@ -1,3 +1,12 @@
+export type RetryErrorKind =
+  | 'provider-transient'
+  | 'tool-timeout'
+  | 'tool-failure'
+  | 'cancelled'
+  | 'checkpoint-missing'
+  | 'container-failure'
+  | 'other';
+
 export interface RetryDecisionInput {
   attempt: number;
   maxAttempts: number;
@@ -13,6 +22,29 @@ export function isTransientProviderError(error?: string | null): boolean {
   );
 }
 
+export function classifyRetryError(error?: string | null): RetryErrorKind {
+  if (!error) return 'other';
+  if (/checkpoint/i.test(error) && /(not found|missing|unknown)/i.test(error)) {
+    return 'checkpoint-missing';
+  }
+  if (/(cancelled|canceled|aborted by user|scheduler cancel)/i.test(error)) {
+    return 'cancelled';
+  }
+  if (/(tool|mcp).*(timed out|timeout)/i.test(error)) {
+    return 'tool-timeout';
+  }
+  if (/(tool|mcp).*(failed|error)/i.test(error)) {
+    return 'tool-failure';
+  }
+  if (/(container spawn error|container exited with code|container timed out)/i.test(error)) {
+    return 'container-failure';
+  }
+  if (isTransientProviderError(error)) {
+    return 'provider-transient';
+  }
+  return 'other';
+}
+
 export function shouldRetryTransientAttempt({
   attempt,
   maxAttempts,
@@ -24,6 +56,6 @@ export function shouldRetryTransientAttempt({
     attempt < maxAttempts &&
     !sentVisibleResult &&
     !observedCompletion &&
-    isTransientProviderError(error)
+    classifyRetryError(error) === 'provider-transient'
   );
 }

@@ -57,6 +57,11 @@ import { startIpcWatcher } from './ipc.js';
 import { compactEngine } from './compact/index.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
+  createNormalizedRunState,
+  markNormalizedOutput,
+  markNormalizedStreamEvent,
+} from './run-lifecycle.js';
+import {
   restoreRemoteControl,
   startRemoteControl,
   stopRemoteControl,
@@ -464,6 +469,18 @@ export function _setRegisteredGroups(
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
  */
+function normalizeTurnCompletion(state: {
+  sentVisibleResult: boolean;
+  observedQueryCompleted: boolean;
+  observedStreamCompletion: boolean;
+}): boolean {
+  return (
+    state.sentVisibleResult ||
+    state.observedQueryCompleted ||
+    state.observedStreamCompletion
+  );
+}
+
 async function processGroupMessages(chatJid: string): Promise<boolean> {
   const group = registeredGroups[chatJid];
   if (!group) return true;
@@ -530,16 +547,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
-  let streamedOutputSent = false;
-  let finalOutputSent = false;
-  let queryCompleted = false;
-  let structuredContentSent = false;
+  const normalizedTurn = createNormalizedRunState();
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
+    markNormalizedOutput(normalizedTurn, result);
+
     if (result.event) {
       await channel.sendAgentEvent?.(chatJid, result.event);
       if (result.event.type === 'assistant') {
-        streamedOutputSent = true;
+        normalizedTurn.sentVisibleResult = true;
       }
       resetIdleTimer();
     }
@@ -552,18 +568,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       // Strip <internal>...</internal> blocks �?agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-      if (text && !structuredContentSent) {
+      if (text) {
         await channel.sendMessage(chatJid, text);
-        finalOutputSent = true;
+        normalizedTurn.sentVisibleResult = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
     }
 
     if (result.queryCompleted) {
-      queryCompleted = true;
-      finalOutputSent =
-        finalOutputSent || streamedOutputSent || structuredContentSent;
       queue.notifyIdle(chatJid);
       resetIdleTimer();
     }
@@ -580,7 +593,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // Partial streaming output is not enough to treat the turn as completed.
     // Only preserve the advanced cursor after the query actually completed
     // or a final message/result was delivered to the user.
-    if (finalOutputSent || queryCompleted) {
+    if (normalizeTurnCompletion(normalizedTurn)) {
       logger.warn(
         { group: group.name },
         'Agent error after completed output, skipping cursor rollback to prevent duplicates',
@@ -641,20 +654,17 @@ async function runAgent(
     const session = sessions[group.folder];
     const sessionId = session?.sessionId;
     const resumeAt = session?.resumeAt || undefined;
-    let attemptSentVisibleResult = false;
-    let attemptObservedCompletion = false;
+    const normalizedAttempt = createNormalizedRunState();
 
     const wrappedOnOutput = onOutput
       ? async (output: ContainerOutput) => {
           persistSessionFromOutput(group.folder, output, sessionId);
-          if (output.result) attemptSentVisibleResult = true;
-          if (output.queryCompleted) attemptObservedCompletion = true;
+          markNormalizedOutput(normalizedAttempt, output);
           await onOutput(output);
         }
       : async (output: ContainerOutput) => {
           persistSessionFromOutput(group.folder, output, sessionId);
-          if (output.result) attemptSentVisibleResult = true;
-          if (output.queryCompleted) attemptObservedCompletion = true;
+          markNormalizedOutput(normalizedAttempt, output);
         };
 
     try {
@@ -673,14 +683,14 @@ async function runAgent(
           queue.registerProcess(chatJid, proc, containerName, group.folder),
         wrappedOnOutput,
         async (event) => {
+          markNormalizedStreamEvent(normalizedAttempt, event);
           const channel = findChannel(channels, chatJid);
           await channel?.handleStreamEvent?.(chatJid, event);
         },
       );
 
       persistSessionFromOutput(group.folder, output, sessionId);
-      if (output.result) attemptSentVisibleResult = true;
-      if (output.queryCompleted) attemptObservedCompletion = true;
+      markNormalizedOutput(normalizedAttempt, output);
 
       if (output.status === 'error') {
         if (
@@ -720,8 +730,10 @@ async function runAgent(
             attempt,
             maxAttempts,
             error: output.error,
-            sentVisibleResult: attemptSentVisibleResult,
-            observedCompletion: attemptObservedCompletion,
+            sentVisibleResult: normalizedAttempt.sentVisibleResult,
+            observedCompletion:
+              normalizedAttempt.observedQueryCompleted ||
+              normalizedAttempt.observedStreamCompletion,
           })
         ) {
           const delayMs = AGENT_RETRY_BASE_MS * Math.pow(2, attempt - 1);
@@ -754,8 +766,10 @@ async function runAgent(
           attempt,
           maxAttempts,
           error,
-          sentVisibleResult: attemptSentVisibleResult,
-          observedCompletion: attemptObservedCompletion,
+          sentVisibleResult: normalizedAttempt.sentVisibleResult,
+          observedCompletion:
+            normalizedAttempt.observedQueryCompleted ||
+            normalizedAttempt.observedStreamCompletion,
         })
       ) {
         const delayMs = AGENT_RETRY_BASE_MS * Math.pow(2, attempt - 1);

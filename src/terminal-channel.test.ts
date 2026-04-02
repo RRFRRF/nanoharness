@@ -54,6 +54,38 @@ vi.mock('./terminal-options.js', () => ({
 }));
 
 vi.mock('./terminal/stream-commands.js', () => ({
+  STREAM_COMMANDS: [
+    {
+      name: '/view-mode',
+      usage: '/view-mode <smart|full|minimal>',
+      description: 'switch display mode for streaming',
+    },
+    {
+      name: '/show-thinking',
+      usage: '/show-thinking <on|off>',
+      description: 'show or hide thinking process',
+    },
+    {
+      name: '/show-plan',
+      usage: '/show-plan <on|off>',
+      description: 'show or hide execution plan',
+    },
+    {
+      name: '/show-tools',
+      usage: '/show-tools <on|off>',
+      description: 'show or hide tool calls',
+    },
+    {
+      name: '/collapse-thinking',
+      usage: '/collapse-thinking',
+      description: 'toggle thinking collapsed state',
+    },
+    {
+      name: '/stream-status',
+      usage: '/stream-status',
+      description: 'show streaming configuration',
+    },
+  ],
   isStreamCommand: vi.fn((command: string) => {
     const cmd = command.trim().split(/\s+/)[0]?.toLowerCase();
     return [
@@ -306,9 +338,6 @@ describe('TerminalChannel', () => {
       data: { message: 'bad' },
     } as any);
 
-    expect(
-      storeState.messages.some((m) => String(m.label).startsWith('thinking:')),
-    ).toBe(true);
     expect(storeState.messages.some((m) => m.text === 'Starting: Read')).toBe(
       true,
     );

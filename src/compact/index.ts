@@ -33,6 +33,7 @@ export {
   ArchiveEntry,
   ToolResultSummary,
   CompactOptions,
+  CompactDiagnostics,
 } from './types.js';
 
 // Classifier

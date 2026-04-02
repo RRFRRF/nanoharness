@@ -458,7 +458,8 @@ export class IntelligentCompactEngine {
    */
   compact(messages: CompactMessage[], sessionId?: string): CompactResult {
     const tokensBefore = this.calculateTokens(messages);
-    const level = this.determineLevel(tokensBefore);
+    const requestedLevel = this.determineLevel(tokensBefore);
+    const level = requestedLevel;
 
     logger.debug(
       {
@@ -484,6 +485,14 @@ export class IntelligentCompactEngine {
           compressionRatio: 1,
           level: CompressionLevel.NONE,
           timestamp: new Date().toISOString(),
+        },
+        diagnostics: {
+          sessionId,
+          persistArchives: this.config.persistArchives,
+          archiveStoreBacked: this.config.persistArchives && !!sessionId,
+          requestedLevel,
+          appliedLevel: CompressionLevel.NONE,
+          archiveIds: [],
         },
       };
     }
@@ -585,6 +594,14 @@ export class IntelligentCompactEngine {
       level,
       stats,
       archivedIds,
+      diagnostics: {
+        sessionId,
+        persistArchives: this.config.persistArchives,
+        archiveStoreBacked: this.config.persistArchives && !!sessionId,
+        requestedLevel,
+        appliedLevel: level,
+        archiveIds: archivedIds,
+      },
     };
   }
 
@@ -600,6 +617,23 @@ export class IntelligentCompactEngine {
       return undefined;
     }
     return sessionArchives.get(archiveId);
+  }
+
+  getDiagnostics(sessionId?: string): {
+    sessionId?: string;
+    persistArchives: boolean;
+    archiveStoreBacked: boolean;
+    archiveCount: number;
+    archiveIds: string[];
+  } {
+    const sessionArchives = sessionId ? archiveStore.get(sessionId) : undefined;
+    return {
+      sessionId,
+      persistArchives: this.config.persistArchives,
+      archiveStoreBacked: this.config.persistArchives && !!sessionId,
+      archiveCount: sessionArchives?.size || 0,
+      archiveIds: sessionArchives ? Array.from(sessionArchives.keys()) : [],
+    };
   }
 
   /**

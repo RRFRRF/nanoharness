@@ -62,7 +62,7 @@ describe('IntelligentCompactEngine', () => {
       const result = engine.compact([]);
       expect(result.messages).toHaveLength(0);
       expect(result.level).toBe(CompressionLevel.NONE);
-      expect(result.stats.compressionRatio).toBe(1);
+      expect(result.diagnostics?.appliedLevel).toBe(CompressionLevel.NONE);
     });
 
     it('should handle single message without compression', () => {
@@ -182,7 +182,7 @@ describe('IntelligentCompactEngine', () => {
 
       if (result.level === CompressionLevel.L4_ARCHIVE) {
         expect(result.archivedIds?.length).toBeGreaterThan(0);
-        expect(result.stats.archivedCount).toBeGreaterThan(0);
+        expect(result.diagnostics?.archiveIds.length).toBeGreaterThan(0);
         const archiveRef = result.messages.find((m) =>
           m.content.includes('[Archived'),
         );

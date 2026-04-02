@@ -5,8 +5,13 @@
 
 import { TerminalInkStore } from '../terminal-ink.js';
 
-// Stream command definitions
-export const STREAM_COMMANDS = [
+export interface StreamCommandSpec {
+  name: string;
+  usage: string;
+  description: string;
+}
+
+export const STREAM_COMMANDS: StreamCommandSpec[] = [
   {
     name: '/view-mode',
     usage: '/view-mode <smart|full|minimal>',

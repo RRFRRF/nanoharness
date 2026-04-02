@@ -140,6 +140,13 @@ interface LoadedMcpToolSet {
   servers: ConfiguredMcpServer[];
 }
 
+interface NormalizedMcpToolResult {
+  text: string;
+  structured?: string;
+  isError: boolean;
+  summary: string;
+}
+
 const WORKSPACE_ROOT = '/workspace';
 const GROUP_ROOT = '/workspace/group';
 const GLOBAL_ROOT = '/workspace/global';
@@ -956,7 +963,16 @@ function jsonSchemaObjectToZod(
   return objectSchema.catchall(z.unknown());
 }
 
-export function renderMcpToolResult(result: AnyRecord): string {
+function stringifyStructuredContent(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+export function normalizeMcpToolResult(result: AnyRecord): NormalizedMcpToolResult {
   const parts: string[] = [];
 
   if (Array.isArray(result.content)) {
@@ -981,19 +997,29 @@ export function renderMcpToolResult(result: AnyRecord): string {
     }
   }
 
-  if (result.structuredContent && typeof result.structuredContent === 'object') {
-    try {
-      parts.push(JSON.stringify(result.structuredContent, null, 2));
-    } catch {
-      parts.push(String(result.structuredContent));
-    }
+  const structured = stringifyStructuredContent(result.structuredContent);
+  if (structured) {
+    parts.push(structured);
   }
 
-  const rendered = parts.join('\n\n').trim();
-  if (!rendered) {
-    return result.isError ? 'MCP tool returned an error.' : 'MCP tool completed.';
-  }
-  return rendered;
+  const text = parts.join('\n\n').trim();
+  const isError = result.isError === true;
+  const summary = isError
+    ? 'MCP tool returned an error.'
+    : text
+      ? 'MCP tool completed with output.'
+      : 'MCP tool completed.';
+
+  return {
+    text: text || summary,
+    structured,
+    isError,
+    summary,
+  };
+}
+
+export function renderMcpToolResult(result: AnyRecord): string {
+  return normalizeMcpToolResult(result).text;
 }
 
 export async function loadConfiguredMcpTools(
@@ -1059,11 +1085,11 @@ export async function loadConfiguredMcpTools(
                 },
                 CompatibilityCallToolResultSchema,
               )) as unknown as AnyRecord;
-              const rendered = renderMcpToolResult(result);
+              const normalized = normalizeMcpToolResult(result);
               if (result.isError === true) {
-                throw new Error(rendered);
+                throw new Error(normalized.text);
               }
-              return rendered;
+              return normalized.text;
             },
             {
               name: toolName,

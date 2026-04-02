@@ -41,6 +41,11 @@ import {
 import { detectAuthMode, detectProvider } from './credential-proxy.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
+import {
+  createContainerLifecycleState,
+  trackContainerOutput,
+  trackContainerStreamEvent,
+} from './container-lifecycle.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -416,6 +421,11 @@ export async function runContainerAgent(
     let streamProcessor: StreamProcessor | null = null;
     const streamEvents: StreamEvent[] = [];
 
+    const lifecycle = createContainerLifecycleState(
+      input.sessionId,
+      input.resumeAt,
+    );
+
     if (streamingEnabled) {
       const processorOptions: ProcessOptions = {
         sessionId: input.sessionId || `new-${Date.now()}`,
@@ -448,8 +458,6 @@ export async function runContainerAgent(
 
     // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
     let parseBuffer = '';
-    let newSessionId: string | undefined;
-    let lastAssistantUuid: string | undefined;
     let outputChain = Promise.resolve();
 
     container.stdout.on('data', (data) => {
@@ -486,13 +494,7 @@ export async function runContainerAgent(
 
           try {
             const parsed: ContainerOutput = JSON.parse(jsonStr);
-            if (parsed.newSessionId) {
-              newSessionId = parsed.newSessionId;
-            }
-            if (parsed.lastAssistantUuid) {
-              lastAssistantUuid = parsed.lastAssistantUuid;
-            }
-            hadStreamingOutput = true;
+            trackContainerOutput(lifecycle, parsed);
             // Activity detected — reset the hard timeout
             resetTimeout();
             // Call onOutput for all markers (including null results)
@@ -515,11 +517,8 @@ export async function runContainerAgent(
           if (onStreamEvent) {
             outputChain = outputChain.then(() => onStreamEvent(event));
           }
-          // Reset timeout on streaming activity
-          if (event.type !== 'error') {
-            hadStreamingOutput = true;
-            resetTimeout();
-          }
+          trackContainerStreamEvent(lifecycle, event);
+          resetTimeout();
         }
       }
     });
@@ -548,7 +547,6 @@ export async function runContainerAgent(
     });
 
     let timedOut = false;
-    let hadStreamingOutput = false;
     const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
     // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
     // graceful _close sentinel has time to trigger before the hard kill fires.
@@ -601,7 +599,7 @@ export async function runContainerAgent(
             `Container: ${containerName}`,
             `Duration: ${duration}ms`,
             `Exit Code: ${code}`,
-            `Had Streaming Output: ${hadStreamingOutput}`,
+            `Had Streaming Output: ${lifecycle.hadOutputActivity}`,
           ].join('\n'),
         );
         try {
@@ -616,7 +614,7 @@ export async function runContainerAgent(
         // Timeout after output = idle cleanup, not failure.
         // The agent already sent its response; this is just the
         // container being reaped after the idle period expired.
-        if (hadStreamingOutput) {
+        if (lifecycle.hadOutputActivity) {
           logger.info(
             { group: group.name, containerName, duration, code },
             'Container timed out after output (idle cleanup)',
@@ -625,8 +623,8 @@ export async function runContainerAgent(
             resolve({
               status: 'success',
               result: null,
-              newSessionId,
-              lastAssistantUuid,
+              newSessionId: lifecycle.newSessionId,
+              lastAssistantUuid: lifecycle.lastAssistantUuid,
               streamEvents: streamEvents.length > 0 ? streamEvents : undefined,
             });
           });
@@ -749,14 +747,14 @@ export async function runContainerAgent(
       if (onOutput) {
         outputChain.then(() => {
           logger.info(
-            { group: group.name, duration, newSessionId },
+            { group: group.name, duration, newSessionId: lifecycle.newSessionId },
             'Container completed (streaming mode)',
           );
           resolve({
             status: 'success',
             result: null,
-            newSessionId,
-            lastAssistantUuid,
+            newSessionId: lifecycle.newSessionId,
+            lastAssistantUuid: lifecycle.lastAssistantUuid,
             streamEvents: streamEvents.length > 0 ? streamEvents : undefined,
           });
         });

@@ -1,8 +1,7 @@
 import { Channel, NewMessage } from './types.js';
 import { formatLocalTime } from './timezone.js';
-import { compactEngine } from './compact/index.js';
-import { logger } from './logger.js';
 import { CompressionLevel, CompactMessage } from './compact/types.js';
+import { preparePromptMessages } from './prompt-context.js';
 
 export function escapeXml(s: string): string {
   if (!s) return '';
@@ -25,28 +24,15 @@ export function formatMessages(
   let finalMessages: CompactMessage[] = messages as CompactMessage[];
   let compressionMetadata = '';
 
-  // Apply intelligent context compaction if sessionId is provided
-  if (sessionId) {
-    try {
-      const compactMessages = messages.map((m) => ({
-        ...m,
-        isCompacted: false,
-      }));
+  const prepared = preparePromptMessages(finalMessages, sessionId);
+  finalMessages = prepared.messages;
 
-      const result = compactEngine.compact(compactMessages, sessionId);
-
-      if (result.level !== CompressionLevel.NONE) {
-        finalMessages = result.messages;
-        compressionMetadata = ` compact_level="${result.level}" original_messages="${result.stats.totalMessages}" compacted="${result.stats.compactedCount}" tokens_before="${result.stats.tokensBefore}" tokens_after="${result.stats.tokensAfter}" compression_ratio="${result.stats.compressionRatio.toFixed(2)}"`;
-      }
-    } catch (err) {
-      logger.error(
-        { err, sessionId },
-        'Error during message compaction, falling back to original messages',
-      );
-      // Fallback to original messages
-      finalMessages = messages as CompactMessage[];
-    }
+  if (
+    prepared.compactResult &&
+    prepared.compactResult.level !== CompressionLevel.NONE
+  ) {
+    const { stats, level } = prepared.compactResult;
+    compressionMetadata = ` compact_level="${level}" original_messages="${stats.totalMessages}" compacted="${stats.compactedCount}" tokens_before="${stats.tokensBefore}" tokens_after="${stats.tokensAfter}" compression_ratio="${stats.compressionRatio.toFixed(2)}"`;
   }
 
   const lines = finalMessages.map((m) => {
