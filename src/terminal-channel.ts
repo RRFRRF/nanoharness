@@ -2,6 +2,13 @@ import { mountTerminalInkApp, TerminalInkStore } from './terminal-ink.js';
 import { subscribeTerminalLogs, TerminalLogItem } from './terminal-log-sink.js';
 import { getTerminalOptions } from './terminal-options.js';
 import { AgentStreamEvent, Channel, NewMessage } from './types.js';
+import { StreamEvent, StreamProcessor, ProcessOptions } from './streaming/index.js';
+import {
+  handleStreamCommand,
+  isStreamCommand,
+  getStreamConfig,
+} from './terminal/stream-commands.js';
+import { STREAMING_CONFIG } from './config.js';
 
 export interface TerminalAgentSummary {
   jid: string;
@@ -105,6 +112,36 @@ const COMMAND_SPECS: CommandSpec[] = [
     name: '/quit',
     usage: '/quit',
     description: 'exit terminal mode',
+  },
+  {
+    name: '/view-mode',
+    usage: '/view-mode <smart|full|minimal>',
+    description: 'switch display mode for streaming',
+  },
+  {
+    name: '/show-thinking',
+    usage: '/show-thinking <on|off>',
+    description: 'show or hide thinking process',
+  },
+  {
+    name: '/show-plan',
+    usage: '/show-plan <on|off>',
+    description: 'show or hide execution plan',
+  },
+  {
+    name: '/show-tools',
+    usage: '/show-tools <on|off>',
+    description: 'show or hide tool calls',
+  },
+  {
+    name: '/collapse-thinking',
+    usage: '/collapse-thinking',
+    description: 'toggle thinking collapsed state',
+  },
+  {
+    name: '/stream-status',
+    usage: '/stream-status',
+    description: 'show streaming configuration',
   },
 ];
 
@@ -362,12 +399,28 @@ export class TerminalChannel implements Channel {
   private inkStore: TerminalInkStore | null = null;
   private inkApp: { unmount: () => void } | null = null;
   private unsubscribeInkLogs: (() => void) | null = null;
+  private streamProcessor: StreamProcessor | null = null;
+  private streamEvents: StreamEvent[] = [];
 
   constructor(private deps: TerminalChannelDeps) {}
 
   async connect(): Promise<void> {
     if (this.connected) return;
     this.connected = true;
+
+    // Initialize stream processor
+    if (STREAMING_CONFIG.ENABLED) {
+      const processorOptions: ProcessOptions = {
+        sessionId: `terminal-${Date.now()}`,
+        groupName: 'terminal',
+        showThinking: STREAMING_CONFIG.SHOW_THINKING,
+        showPlan: STREAMING_CONFIG.SHOW_PLAN,
+        showTools: STREAMING_CONFIG.SHOW_TOOLS,
+        collapseThinking: STREAMING_CONFIG.THINKING_COLLAPSED,
+        maxEvents: STREAMING_CONFIG.MAX_EVENTS,
+      };
+      this.streamProcessor = new StreamProcessor(processorOptions);
+    }
 
     this.selectInitialAgent();
     this.connectInkMode();
@@ -393,6 +446,11 @@ export class TerminalChannel implements Channel {
       this.inkStore.dispose();
       this.inkStore = null;
     }
+    if (this.streamProcessor) {
+      this.streamProcessor.dispose();
+      this.streamProcessor = null;
+    }
+    this.streamEvents = [];
   }
 
   isConnected(): boolean {
@@ -442,6 +500,142 @@ export class TerminalChannel implements Channel {
       text: event.text,
       tone: 'status',
     });
+    this.refreshInkContext();
+  }
+
+  /**
+   * Handle streaming events from agent execution
+   */
+  async handleStreamEvent(_jid: string, event: StreamEvent): Promise<void> {
+    this.streamEvents.push(event);
+
+    const current = this.currentAgent();
+    const label = current ? current.name : 'agent';
+    const streamConfig = getStreamConfig();
+    const pushSystemMessage = (text: string | null | undefined, tone: 'system' | 'error' = 'system') => {
+      if (!text) return;
+      this.inkStore?.addMessage({
+        id: `${event.type}-${event.timestamp}-${Math.random().toString(36).slice(2, 6)}`,
+        label: `${event.type}:${label}`,
+        text,
+        tone,
+      });
+    };
+
+    switch (event.type) {
+      case 'thinking': {
+        if (streamConfig.showThinking) {
+          const data = event.data as { content?: string };
+          const content = typeof data?.content === 'string' ? data.content : '';
+          if (content) {
+            pushSystemMessage(
+              content.slice(0, 200) + (content.length > 200 ? '...' : ''),
+            );
+          }
+        }
+        break;
+      }
+      case 'tool_start': {
+        if (streamConfig.showTools) {
+          const data = event.data as { name?: string };
+          if (typeof data?.name === 'string' && data.name) {
+            pushSystemMessage(`Starting: ${data.name}`);
+          }
+        }
+        break;
+      }
+      case 'tool_progress': {
+        if (streamConfig.showTools) {
+          const data = event.data as { name?: string; message?: string; percent?: number };
+          const parts = [
+            typeof data?.name === 'string' && data.name ? data.name : null,
+            typeof data?.message === 'string' && data.message ? data.message : null,
+            typeof data?.percent === 'number' ? `${data.percent}%` : null,
+          ].filter(Boolean);
+          if (parts.length > 0) {
+            pushSystemMessage(parts.join(' — '));
+          }
+        }
+        break;
+      }
+      case 'tool_complete': {
+        if (streamConfig.showTools) {
+          const data = event.data as { name?: string; duration?: number };
+          if (typeof data?.name === 'string' && data.name) {
+            const duration = typeof data.duration === 'number' ? ` (${data.duration}ms)` : '';
+            pushSystemMessage(`✓ ${data.name}${duration}`);
+          }
+        }
+        break;
+      }
+      case 'decision': {
+        const data = event.data as { description?: string; choice?: string };
+        const parts = [
+          typeof data?.description === 'string' ? data.description : null,
+          typeof data?.choice === 'string' ? data.choice : null,
+        ].filter(Boolean);
+        if (parts.length > 0) {
+          pushSystemMessage(parts.join(': '));
+        }
+        break;
+      }
+      case 'plan': {
+        if (streamConfig.showPlan) {
+          const data = event.data as { steps?: Array<{ description?: string }> };
+          const steps = Array.isArray(data?.steps)
+            ? data.steps
+                .map((step) => (typeof step?.description === 'string' ? step.description : null))
+                .filter(Boolean)
+            : [];
+          if (steps.length > 0) {
+            pushSystemMessage(`Plan: ${steps.join(' | ')}`);
+          }
+        }
+        break;
+      }
+      case 'plan_step': {
+        if (streamConfig.showPlan) {
+          const data = event.data as { status?: string; progress?: number; message?: string; stepId?: string };
+          const parts = [
+            typeof data?.stepId === 'string' ? data.stepId : null,
+            typeof data?.status === 'string' ? data.status : null,
+            typeof data?.message === 'string' ? data.message : null,
+            typeof data?.progress === 'number' ? `${data.progress}%` : null,
+          ].filter(Boolean);
+          if (parts.length > 0) {
+            pushSystemMessage(`Plan step: ${parts.join(' — ')}`);
+          }
+        }
+        break;
+      }
+      case 'content': {
+        const data = event.data as { text?: string };
+        if (typeof data?.text === 'string' && data.text) {
+          this.inkStore?.addMessage({
+            id: `content-${event.timestamp}`,
+            label: `agent:${label}`,
+            text: data.text,
+            tone: 'agent',
+            mergeKey: _jid,
+          });
+        }
+        break;
+      }
+      case 'error': {
+        const data = event.data as { message?: string; error?: string; details?: unknown };
+        const text =
+          (typeof data?.message === 'string' && data.message) ||
+          (typeof data?.error === 'string' && data.error) ||
+          (typeof data?.details === 'string' && data.details) ||
+          null;
+        pushSystemMessage(text ?? JSON.stringify(event.data ?? 'Unknown streaming error'), 'error');
+        break;
+      }
+      case 'complete':
+      default:
+        break;
+    }
+
     this.refreshInkContext();
   }
 
@@ -524,7 +718,24 @@ export class TerminalChannel implements Channel {
   private pushInkLogItem(item: TerminalLogItem): void {
     if (!this.inkStore) return;
 
+    const shouldSuppressLogText = (text: string): boolean => {
+      const trimmed = text.trim();
+      if (!trimmed) return true;
+      return (
+        trimmed === '---NANOCLAW_OUTPUT_START---' ||
+        trimmed === '---NANOCLAW_OUTPUT_END---' ||
+        trimmed.startsWith('<<<') ||
+        trimmed.startsWith('{"status":') ||
+        trimmed.startsWith('{"type":') ||
+        trimmed.startsWith('langsmith/experimental/sandbox is in alpha.') ||
+        trimmed.startsWith('[agent-runner] Received input for group:') ||
+        trimmed.startsWith('[agent-runner] Starting query') ||
+        trimmed.startsWith('[agent-runner] Query ended, waiting for next IPC message...')
+      );
+    };
+
     if (item.type === 'text') {
+      if (shouldSuppressLogText(item.text)) return;
       this.inkStore.addMessage({
         id: `log-text-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         label: 'log',
@@ -562,6 +773,7 @@ export class TerminalChannel implements Channel {
           `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`,
       );
     const text = [msg, ...details].filter(Boolean).join('\n');
+    if (shouldSuppressLogText(text)) return;
     this.inkStore.addMessage({
       id: `log-record-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       label: `log:${level}`,
@@ -634,6 +846,14 @@ export class TerminalChannel implements Channel {
     }
 
     if (trimmed.startsWith('/')) {
+      if (this.inkStore && isStreamCommand(trimmed)) {
+        const handled = handleStreamCommand(trimmed, this.inkStore);
+        if (handled) {
+          this.refreshInkContext();
+          return;
+        }
+      }
+
       const command = parseTerminalCommand(trimmed);
       await this.handleInkCommand(command);
       this.refreshInkContext();

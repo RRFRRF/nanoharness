@@ -20,7 +20,7 @@ const chatJid = process.env.NANOCLAW_CHAT_JID!;
 const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
 
-function writeIpcFile(dir: string, data: object): string {
+export function writeIpcFile(dir: string, data: object): string {
   fs.mkdirSync(dir, { recursive: true });
 
   const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
@@ -332,6 +332,8 @@ Use available_groups.json to find the JID for a group. The folder name must be c
     };
   },
 );
+
+export const __testTools = server;
 
 // Start the stdio transport
 const transport = new StdioServerTransport();

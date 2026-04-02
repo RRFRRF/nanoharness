@@ -54,6 +54,7 @@ import {
   resolveGroupIpcPath,
 } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
+import { compactEngine } from './compact/index.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   restoreRemoteControl,
@@ -446,6 +447,12 @@ export function getAvailableGroups(): import('./container-runner.js').AvailableG
     }));
 }
 
+export const __testInternals = {
+  persistSessionFromOutput,
+  processGroupMessages,
+  runAgent,
+};
+
 /** @internal - exported for testing */
 export function _setRegisteredGroups(
   groups: Record<string, RegisteredGroup>,
@@ -489,7 +496,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  const sessionId = sessions[chatJid]?.sessionId || sessions[group.folder]?.sessionId || 'default';
+  const prompt = formatMessages(missedMessages, TIMEZONE, sessionId);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -522,6 +530,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let streamedOutputSent = false;
   let finalOutputSent = false;
   let queryCompleted = false;
+  let structuredContentSent = false;
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     if (result.event) {
@@ -540,7 +549,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       // Strip <internal>...</internal> blocks �?agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-      if (text) {
+      if (text && !structuredContentSent) {
         await channel.sendMessage(chatJid, text);
         finalOutputSent = true;
       }
@@ -550,7 +559,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
     if (result.queryCompleted) {
       queryCompleted = true;
-      finalOutputSent = finalOutputSent || streamedOutputSent;
+      finalOutputSent = finalOutputSent || streamedOutputSent || structuredContentSent;
       queue.notifyIdle(chatJid);
       resetIdleTimer();
     }
@@ -659,6 +668,10 @@ async function runAgent(
         (proc, containerName) =>
           queue.registerProcess(chatJid, proc, containerName, group.folder),
         wrappedOnOutput,
+        async (event) => {
+          const channel = findChannel(channels, chatJid);
+          await channel?.handleStreamEvent?.(chatJid, event);
+        },
       );
 
       persistSessionFromOutput(group.folder, output, sessionId);
@@ -830,7 +843,8 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend, TIMEZONE);
+          const sessionId = sessions[chatJid]?.sessionId || sessions[group.folder]?.sessionId || 'default';
+          const formatted = formatMessages(messagesToSend, TIMEZONE, sessionId);
 
           if (queue.sendMessage(chatJid, formatted)) {
             logger.debug(

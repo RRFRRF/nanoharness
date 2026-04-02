@@ -13,6 +13,13 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
+import {
+  StreamingOutput,
+  getStreamingOutput,
+  STREAM_MARKERS,
+  LEGACY_MARKERS,
+} from './streaming-output.js';
+
 import { ChatAnthropic } from '@langchain/anthropic';
 import { ChatOpenAI } from '@langchain/openai';
 import { tool } from '@langchain/core/tools';
@@ -40,6 +47,7 @@ interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  enableStreaming?: boolean;
 }
 
 interface ContainerOutput {
@@ -163,13 +171,25 @@ const QUERY_RECURSION_LIMIT = Math.max(
   Number.parseInt(process.env.NANOCLAW_RECURSION_LIMIT || '600', 10) || 600,
 );
 
-const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
-const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+const OUTPUT_START_MARKER = LEGACY_MARKERS.OUTPUT_START;
+const OUTPUT_END_MARKER = LEGACY_MARKERS.OUTPUT_END;
+
+// Global streaming output instance
+const streamingOutput = getStreamingOutput();
 
 function writeOutput(output: ContainerOutput): void {
+  // Always write legacy format for backward compatibility
   console.log(OUTPUT_START_MARKER);
   console.log(JSON.stringify(output));
   console.log(OUTPUT_END_MARKER);
+
+  // Streaming events should be emitted explicitly by the runtime as they happen.
+  // Do not mirror legacy result/error payloads into streaming output here,
+  // otherwise the host sees duplicate final content/errors.
+
+  if (output.queryCompleted) {
+    streamingOutput.complete();
+  }
 }
 
 function log(message: string): void {
@@ -663,7 +683,7 @@ function writeIpcFile(dir: string, data: object): string {
   return filename;
 }
 
-function validateScheduleValue(
+export function validateScheduleValue(
   scheduleType: 'cron' | 'interval' | 'once',
   scheduleValue: string,
 ): string | null {
@@ -936,7 +956,7 @@ function jsonSchemaObjectToZod(
   return objectSchema.catchall(z.unknown());
 }
 
-function renderMcpToolResult(result: AnyRecord): string {
+export function renderMcpToolResult(result: AnyRecord): string {
   const parts: string[] = [];
 
   if (Array.isArray(result.content)) {
@@ -976,7 +996,7 @@ function renderMcpToolResult(result: AnyRecord): string {
   return rendered;
 }
 
-async function loadConfiguredMcpTools(
+export async function loadConfiguredMcpTools(
   emitStatus: (text: string, replace?: boolean) => void,
 ): Promise<LoadedMcpToolSet> {
   const servers = parseConfiguredMcpServers();
@@ -1073,7 +1093,7 @@ async function loadConfiguredMcpTools(
   };
 }
 
-function createNanoClawTools(
+export function createNanoClawTools(
   containerInput: ContainerInput,
   emitStatus: (text: string, replace?: boolean) => void,
 ) {
@@ -1574,6 +1594,10 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Initialize streaming output with session ID
+  streamingOutput.setSessionId(containerInput.sessionId);
+  streamingOutput.setEnabled(containerInput.enableStreaming !== false);
+
   fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
   fs.mkdirSync(MESSAGES_DIR, { recursive: true });
   fs.mkdirSync(TASKS_DIR, { recursive: true });
@@ -1585,6 +1609,9 @@ async function main(): Promise<void> {
   }
 
   ensureRuntimeWorkspace(containerInput);
+
+  // Emit initial streaming event
+  streamingOutput.decision('Container startup', 'Workspace initialized');
 
   const statusWriter = (text: string, replace = false) => {
     writeOutput({
@@ -1700,6 +1727,8 @@ async function main(): Promise<void> {
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
     log(`Agent error: ${errorMessage}`);
+    streamingOutput.error(errorMessage);
+    streamingOutput.complete();
     writeOutput({
       status: 'error',
       result: null,
@@ -1709,6 +1738,8 @@ async function main(): Promise<void> {
     });
     process.exit(1);
   } finally {
+    // Cleanup streaming output
+    streamingOutput.cleanup();
     await cleanup();
   }
 }
@@ -1722,6 +1753,8 @@ if (isDirectRun) {
   main().catch((err) => {
     const errorMessage = err instanceof Error ? err.message : String(err);
     log(`Fatal startup error: ${errorMessage}`);
+    streamingOutput.error(errorMessage);
+    streamingOutput.complete();
     writeOutput({
       status: 'error',
       result: null,

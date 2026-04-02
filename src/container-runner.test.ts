@@ -25,6 +25,15 @@ vi.mock('./config.js', () => ({
   MODEL_PROVIDER: 'anthropic',
   OPENAI_MODEL: undefined,
   TIMEZONE: 'America/Los_Angeles',
+  STREAMING_CONFIG: {
+    ENABLED: true,
+    SHOW_THINKING: true,
+    THINKING_COLLAPSED: false,
+    SHOW_PLAN: true,
+    SHOW_TOOLS: true,
+    BUFFER_SIZE: 1000,
+    MAX_EVENTS: 10000,
+  },
 }));
 
 // Mock logger
@@ -278,6 +287,30 @@ describe('container-runner timeout behavior', () => {
     expect(result.lastAssistantUuid).toBe('assistant-456');
   });
 
+  it('forwards structured stream events through onStreamEvent', async () => {
+    const onOutput = vi.fn(async () => {});
+    const onStreamEvent = vi.fn(async () => {});
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      onOutput,
+      onStreamEvent,
+    );
+
+    fakeProc.stdout.push('<<<THINKING>>>{"content":"reasoning"}<<<THINKING_END>>>');
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    await resultPromise;
+    expect(onStreamEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: 'reasoning',
+      }),
+    );
+  });
+
   it('passes query completion markers through streaming callbacks', async () => {
     const onOutput = vi.fn(async () => {});
     const resultPromise = runContainerAgent(
@@ -331,5 +364,94 @@ describe('container-runner timeout behavior', () => {
     fakeProc.emit('close', 0);
     await vi.advanceTimersByTimeAsync(10);
     await resultPromise;
+  });
+
+  it('parses markers split across stdout chunks', async () => {
+    const onOutput = vi.fn(async () => {});
+    const resultPromise = runContainerAgent(testGroup, testInput, () => {}, onOutput);
+
+    const payload = `${OUTPUT_START_MARKER}\n${JSON.stringify({
+      status: 'success',
+      result: 'chunked',
+      newSessionId: 'split-session',
+    })}\n${OUTPUT_END_MARKER}\n`;
+    fakeProc.stdout.push(payload.slice(0, 25));
+    fakeProc.stdout.push(payload.slice(25, 70));
+    fakeProc.stdout.push(payload.slice(70));
+
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(onOutput).toHaveBeenCalledTimes(1);
+    expect(result.newSessionId).toBe('split-session');
+  });
+
+  it('parses multiple markers from a single stdout chunk', async () => {
+    const onOutput = vi.fn(async () => {});
+    const resultPromise = runContainerAgent(testGroup, testInput, () => {}, onOutput);
+
+    const first = `${OUTPUT_START_MARKER}\n${JSON.stringify({ status: 'success', result: null, event: { type: 'status', text: 'step 1' } })}\n${OUTPUT_END_MARKER}`;
+    const second = `${OUTPUT_START_MARKER}\n${JSON.stringify({ status: 'success', result: 'final', newSessionId: 'multi-session' })}\n${OUTPUT_END_MARKER}`;
+    fakeProc.stdout.push(`${first}${second}`);
+
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(onOutput).toHaveBeenCalledTimes(2);
+    expect(result.newSessionId).toBe('multi-session');
+  });
+
+  it('ignores malformed markers and still parses later valid output', async () => {
+    const onOutput = vi.fn(async () => {});
+    const resultPromise = runContainerAgent(testGroup, testInput, () => {}, onOutput);
+
+    fakeProc.stdout.push(`${OUTPUT_START_MARKER}\n{not-json}\n${OUTPUT_END_MARKER}`);
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'recovered',
+      newSessionId: 'recover-session',
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(onOutput).toHaveBeenCalledTimes(1);
+    expect(result.result).toBeNull();
+    expect(result.newSessionId).toBe('recover-session');
+  });
+
+  it('returns error when container exits with non-zero code', async () => {
+    const resultPromise = runContainerAgent(testGroup, testInput, () => {});
+
+    fakeProc.stderr.push('fatal issue\n');
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 2);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('error');
+    expect(result.error).toContain('Container exited with code 2');
+  });
+
+  it('times out even if only stderr is active', async () => {
+    const onOutput = vi.fn(async () => {});
+    const resultPromise = runContainerAgent(testGroup, testInput, () => {}, onOutput);
+
+    fakeProc.stderr.push('still logging\n');
+    await vi.advanceTimersByTimeAsync(1829000);
+    fakeProc.stderr.push('more logs\n');
+    await vi.advanceTimersByTimeAsync(2000);
+    fakeProc.emit('close', 137);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('error');
+    expect(onOutput).not.toHaveBeenCalled();
   });
 });

@@ -21,8 +21,14 @@ import {
   IDLE_TIMEOUT,
   MODEL_API_FORMAT,
   OPENAI_MODEL,
+  STREAMING_CONFIG,
   TIMEZONE,
 } from './config.js';
+import {
+  StreamEvent,
+  StreamProcessor,
+  ProcessOptions,
+} from './streaming/index.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import {
@@ -49,6 +55,7 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  enableStreaming?: boolean; // Enable streaming output
 }
 
 export interface ContainerOutput {
@@ -63,6 +70,7 @@ export interface ContainerOutput {
     replace?: boolean;
   };
   error?: string;
+  streamEvents?: StreamEvent[]; // Collected streaming events
 }
 
 interface VolumeMount {
@@ -291,6 +299,12 @@ function buildContainerArgs(
     ['NANOCLAW_AGENT_MAX_RETRIES', process.env.NANOCLAW_AGENT_MAX_RETRIES],
     ['NANOCLAW_AGENT_RETRY_BASE_MS', process.env.NANOCLAW_AGENT_RETRY_BASE_MS],
     ['NANOCLAW_MCP_SERVERS_JSON', process.env.NANOCLAW_MCP_SERVERS_JSON],
+    ['NANOCLAW_STREAMING', process.env.NANOCLAW_STREAMING],
+    ['NANOCLAW_SHOW_THINKING', process.env.NANOCLAW_SHOW_THINKING],
+    ['NANOCLAW_SHOW_PLAN', process.env.NANOCLAW_SHOW_PLAN],
+    ['NANOCLAW_SHOW_TOOLS', process.env.NANOCLAW_SHOW_TOOLS],
+    ['NANOCLAW_THINKING_COLLAPSED', process.env.NANOCLAW_THINKING_COLLAPSED],
+    ['NANOCLAW_STREAM_BUFFER_SIZE', process.env.NANOCLAW_STREAM_BUFFER_SIZE],
   ] as const;
   for (const [key, value] of passthroughEnv) {
     if (value) args.push('-e', `${key}=${value}`);
@@ -329,6 +343,7 @@ export async function runContainerAgent(
   input: ContainerInput,
   onProcess: (proc: ChildProcess, containerName: string) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  onStreamEvent?: (event: StreamEvent) => Promise<void>, // New streaming callback
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
@@ -395,6 +410,24 @@ export async function runContainerAgent(
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
+    // Initialize streaming processor if streaming is enabled
+    const streamingEnabled = input.enableStreaming !== false && STREAMING_CONFIG.ENABLED;
+    let streamProcessor: StreamProcessor | null = null;
+    const streamEvents: StreamEvent[] = [];
+
+    if (streamingEnabled) {
+      const processorOptions: ProcessOptions = {
+        sessionId: input.sessionId || `new-${Date.now()}`,
+        groupName: group.name,
+        showThinking: STREAMING_CONFIG.SHOW_THINKING,
+        showPlan: STREAMING_CONFIG.SHOW_PLAN,
+        showTools: STREAMING_CONFIG.SHOW_TOOLS,
+        collapseThinking: STREAMING_CONFIG.THINKING_COLLAPSED,
+        maxEvents: STREAMING_CONFIG.MAX_EVENTS,
+      };
+      streamProcessor = new StreamProcessor(processorOptions, false);
+    }
+
     const appendStreamLog = (source: 'stdout' | 'stderr', chunk: string) => {
       try {
         fs.appendFileSync(
@@ -437,7 +470,7 @@ export async function runContainerAgent(
         }
       }
 
-      // Stream-parse for output markers
+      // Stream-parse for output markers (legacy format)
       if (onOutput) {
         parseBuffer += chunk;
         let startIdx: number;
@@ -469,6 +502,22 @@ export async function runContainerAgent(
               { group: group.name, error: err },
               'Failed to parse streamed output chunk',
             );
+          }
+        }
+      }
+
+      // Parse streaming events if enabled
+      if (streamProcessor) {
+        const events = streamProcessor.processChunk(chunk);
+        for (const event of events) {
+          streamEvents.push(event);
+          if (onStreamEvent) {
+            outputChain = outputChain.then(() => onStreamEvent(event));
+          }
+          // Reset timeout on streaming activity
+          if (event.type !== 'error') {
+            hadStreamingOutput = true;
+            resetTimeout();
           }
         }
       }
@@ -531,6 +580,12 @@ export async function runContainerAgent(
 
     container.on('close', (code) => {
       clearTimeout(timeout);
+      // Flush any remaining stream events and cleanup
+      if (streamProcessor) {
+        const remainingEvents = streamProcessor.flush();
+        streamEvents.push(...remainingEvents);
+        streamProcessor.dispose();
+      }
       const duration = Date.now() - startTime;
 
       if (timedOut) {
@@ -571,6 +626,7 @@ export async function runContainerAgent(
               result: null,
               newSessionId,
               lastAssistantUuid,
+              streamEvents: streamEvents.length > 0 ? streamEvents : undefined,
             });
           });
           return;
@@ -585,6 +641,7 @@ export async function runContainerAgent(
           status: 'error',
           result: null,
           error: `Container timed out after ${configTimeout}ms`,
+          streamEvents: streamEvents.length > 0 ? streamEvents : undefined,
         });
         return;
       }
@@ -682,6 +739,7 @@ export async function runContainerAgent(
           status: 'error',
           result: null,
           error: `Container exited with code ${code}: ${stderr.slice(-200)}`,
+          streamEvents: streamEvents.length > 0 ? streamEvents : undefined,
         });
         return;
       }
@@ -698,6 +756,7 @@ export async function runContainerAgent(
             result: null,
             newSessionId,
             lastAssistantUuid,
+            streamEvents: streamEvents.length > 0 ? streamEvents : undefined,
           });
         });
         return;
@@ -732,6 +791,11 @@ export async function runContainerAgent(
           'Container completed',
         );
 
+        // Add streaming events to output
+        if (streamEvents.length > 0) {
+          output.streamEvents = streamEvents;
+        }
+
         resolve(output);
       } catch (err) {
         logger.error(
@@ -748,12 +812,19 @@ export async function runContainerAgent(
           status: 'error',
           result: null,
           error: `Failed to parse container output: ${err instanceof Error ? err.message : String(err)}`,
+          streamEvents: streamEvents.length > 0 ? streamEvents : undefined,
         });
       }
     });
 
     container.on('error', (err) => {
       clearTimeout(timeout);
+      // Flush any remaining stream events
+      if (streamProcessor) {
+        const remainingEvents = streamProcessor.flush();
+        streamEvents.push(...remainingEvents);
+        streamProcessor.dispose();
+      }
       logger.error(
         { group: group.name, containerName, error: err },
         'Container spawn error',
@@ -762,6 +833,7 @@ export async function runContainerAgent(
         status: 'error',
         result: null,
         error: `Container spawn error: ${err.message}`,
+        streamEvents: streamEvents.length > 0 ? streamEvents : undefined,
       });
     });
   });

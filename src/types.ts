@@ -77,6 +77,8 @@ export interface TaskRunLog {
   error: string | null;
 }
 
+import { StreamEvent } from './streaming/types.js';
+
 export interface SessionState {
   sessionId: string;
   resumeAt?: string | null;
@@ -105,6 +107,8 @@ export interface Channel {
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: structured agent stream events for rich terminal UIs.
   sendAgentEvent?(jid: string, event: AgentStreamEvent): Promise<void>;
+  // Optional: richer structured streaming events.
+  handleStreamEvent?(jid: string, event: StreamEvent): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
 }
