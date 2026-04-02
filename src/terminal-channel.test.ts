@@ -227,7 +227,9 @@ describe('parseTerminalCommand', () => {
 
   it('builds command menu items only for top-level commands', () => {
     const commandItems = getTerminalCommandMenuItems('/sh', []);
-    expect(commandItems.some((item) => item.label === '/show-thinking')).toBe(true);
+    expect(commandItems.some((item) => item.label === '/show-thinking')).toBe(
+      true,
+    );
 
     expect(getTerminalCommandMenuItems('/view-mode ', [])).toEqual([]);
   });
@@ -267,7 +269,6 @@ describe('parseTerminalCommand', () => {
       ]),
     ).toEqual([]);
   });
-
 });
 
 describe('TerminalChannel', () => {
@@ -491,9 +492,9 @@ describe('TerminalChannel', () => {
     ).toBe(true);
 
     await inkState.mountedProps.onSubmit('/current');
-    expect(
-      storeState.messages.some((m) => m.text === 'No active agent.'),
-    ).toBe(true);
+    expect(storeState.messages.some((m) => m.text === 'No active agent.')).toBe(
+      true,
+    );
 
     await inkState.mountedProps.onSubmit('/new scout --mount /repo --rw');
     expect(

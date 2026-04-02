@@ -151,7 +151,9 @@ function getCommandSpec(name: string): CommandSpec | undefined {
 }
 
 function getAgentQueryOptions(agents: TerminalAgentSummary[]): string[] {
-  return [...new Set(agents.flatMap((agent) => [agent.name, agent.folder]))].sort();
+  return [
+    ...new Set(agents.flatMap((agent) => [agent.name, agent.folder])),
+  ].sort();
 }
 
 function padRight(value: string, width: number): string {
@@ -220,7 +222,9 @@ function buildCommandMenuItems(
   if (!trimmed.startsWith('/')) return [];
 
   const slashToken = trimmed.split(/\s+/, 1)[0] || '';
-  const hasExactCommand = COMMAND_SPECS.some((spec) => spec.name === slashToken);
+  const hasExactCommand = COMMAND_SPECS.some(
+    (spec) => spec.name === slashToken,
+  );
   const shouldShowTopLevelOnly = !/\s/.test(trimmed) && !hasExactCommand;
 
   if (!shouldShowTopLevelOnly) {
@@ -380,7 +384,9 @@ export function getTerminalCompletions(
 
   if (tokens.length <= 1 && !endsWithSpace) {
     const commandNames = COMMAND_SPECS.map((spec) => spec.name);
-    const matches = commandNames.filter((name) => name.startsWith(currentToken));
+    const matches = commandNames.filter((name) =>
+      name.startsWith(currentToken),
+    );
     return [matches.length > 0 ? matches : commandNames, currentToken];
   }
 
@@ -402,7 +408,9 @@ export function getTerminalCompletions(
       return [options, ''];
     }
     if (currentToken.startsWith('--')) {
-      const matches = options.filter((option) => option.startsWith(currentToken));
+      const matches = options.filter((option) =>
+        option.startsWith(currentToken),
+      );
       return [matches.length > 0 ? matches : options, currentToken];
     }
   }
@@ -590,7 +598,8 @@ export class TerminalChannel implements Channel {
   private getPromptStatus(current: TerminalAgentSummary | null): string {
     if (!current) return 'idle';
 
-    const runtimeStatus = current.status || (current.active ? 'running' : 'idle');
+    const runtimeStatus =
+      current.status || (current.active ? 'running' : 'idle');
     if (runtimeStatus !== 'idle') return runtimeStatus;
 
     const transient = this.transientStatuses.get(current.jid);
@@ -650,8 +659,7 @@ export class TerminalChannel implements Channel {
       getNextHistory: () => this.nextHistory(),
       getCommandMenuItems: (input) =>
         buildCommandMenuItems(input, this.deps.listAgents()),
-      applyCommandMenuItem: (input, item) =>
-        applyTerminalMenuItem(input, item),
+      applyCommandMenuItem: (input, item) => applyTerminalMenuItem(input, item),
     });
   }
 
