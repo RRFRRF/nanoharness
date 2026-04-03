@@ -1,5 +1,8 @@
 import type { CompactMessage, CompactResult } from './types.js';
-import { applyFallbackCompaction, preparePromptMessages } from '../prompt-context.js';
+import {
+  applyFallbackCompaction,
+  preparePromptMessages,
+} from '../prompt-context.js';
 import { CompactMode } from './native-compact.js';
 
 export function buildCompactionHeader(result: CompactResult | null): string {

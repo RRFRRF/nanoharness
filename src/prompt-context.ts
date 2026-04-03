@@ -18,7 +18,9 @@ function createNativeCompactRequest(
   compactResult: CompactResult | null = null,
 ): NativeCompactRequest {
   const metadata: PromptPreparationMetadata = {
-    compactMode: compactResult ? CompactMode.FALLBACK_RULE : CompactMode.NATIVE_LLM,
+    compactMode: compactResult
+      ? CompactMode.FALLBACK_RULE
+      : CompactMode.NATIVE_LLM,
     requestedNativeCompact: !!sessionId,
   };
 

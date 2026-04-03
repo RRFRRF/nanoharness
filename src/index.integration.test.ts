@@ -121,8 +121,15 @@ vi.mock('./compact/index.js', () => ({ compactEngine: {} }));
 vi.mock('./router.js', () => ({
   findChannel: vi.fn(() => state.channel),
   formatMessages: vi.fn(
-    (_messages: any[], _timezone: string, sessionId: string, nativeCompactFailed?: boolean) =>
-      nativeCompactFailed ? `formatted:${sessionId}:fallback` : `formatted:${sessionId}`,
+    (
+      _messages: any[],
+      _timezone: string,
+      sessionId: string,
+      nativeCompactFailed?: boolean,
+    ) =>
+      nativeCompactFailed
+        ? `formatted:${sessionId}:fallback`
+        : `formatted:${sessionId}`,
   ),
   formatOutbound: vi.fn(),
   escapeXml: vi.fn(),

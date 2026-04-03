@@ -1,7 +1,10 @@
 import { Channel, NewMessage } from './types.js';
 import { formatLocalTime } from './timezone.js';
 import { CompactMessage } from './compact/types.js';
-import { buildCompactionHeader, prepareMessagesForPrompt } from './compact/prompt-preparation.js';
+import {
+  buildCompactionHeader,
+  prepareMessagesForPrompt,
+} from './compact/prompt-preparation.js';
 
 export function escapeXml(s: string): string {
   if (!s) return '';

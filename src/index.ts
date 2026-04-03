@@ -704,7 +704,11 @@ async function runAgent(
         );
 
         const fallbackPrompt = formatMessages(
-          getMessagesSince(chatJid, lastAgentTimestamp[chatJid] || '', ASSISTANT_NAME),
+          getMessagesSince(
+            chatJid,
+            lastAgentTimestamp[chatJid] || '',
+            ASSISTANT_NAME,
+          ),
           TIMEZONE,
           sessionId,
           true,

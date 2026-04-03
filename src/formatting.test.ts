@@ -111,7 +111,6 @@ describe('formatMessages', () => {
     expect(result).toContain('<messages>\n</messages>');
   });
 
-
   it('does not emit compact metadata on native compact path before fallback', () => {
     const result = formatMessages(
       [makeMsg({ content: 'x'.repeat(2000) })],
@@ -120,7 +119,6 @@ describe('formatMessages', () => {
     );
     expect(result).not.toContain('compact_level="');
   });
-
 });
 
 // --- TRIGGER_PATTERN ---
