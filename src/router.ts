@@ -19,7 +19,6 @@ export function formatMessages(
   messages: NewMessage[],
   timezone: string,
   sessionId?: string,
-  nativeCompactFailed = false,
 ): string {
   if (!messages || messages.length === 0) {
     return `<context timezone="${escapeXml(timezone)}" />\n<messages>\n</messages>`;
@@ -27,11 +26,7 @@ export function formatMessages(
 
   let finalMessages: CompactMessage[] = messages as CompactMessage[];
 
-  const prepared = prepareMessagesForPrompt(
-    finalMessages,
-    sessionId,
-    nativeCompactFailed,
-  );
+  const prepared = prepareMessagesForPrompt(finalMessages, sessionId);
   finalMessages = prepared.messages;
   const compressionMetadata = buildCompactionHeader(prepared.compactResult);
 

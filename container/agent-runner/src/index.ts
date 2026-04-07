@@ -93,8 +93,30 @@ interface QueryRunResult {
   nativeCompact?: NativeCompactOutcome;
 }
 
+interface RuntimeAgent {
+  invoke: (input: unknown, config?: unknown) => Promise<unknown>;
+  stream?: (
+    input: unknown,
+    config?: unknown,
+  ) => Promise<AsyncIterable<unknown>>;
+}
+
+interface NativeStreamBridgeEvent {
+  type: 'tool_start' | 'tool_progress' | 'tool_complete' | 'decision' | 'content';
+  key?: string;
+  name?: string;
+  input?: unknown;
+  message?: string;
+  percent?: number;
+  result?: unknown;
+  description?: string;
+  choice?: string;
+  text?: string;
+}
+
 type AnyRecord = Record<string, unknown>;
 type MountMode = 'rw' | 'ro' | 'host-configured';
+type ModelProvider = 'anthropic' | 'openai';
 
 interface WorkspaceMountInfo {
   path: string;
@@ -140,6 +162,13 @@ interface RuntimePromptBundle {
   snapshot: RuntimeContextSnapshot;
 }
 
+type HumanDecisionType = 'approve' | 'edit' | 'reject';
+
+interface ResolvedWorkspaceMemoryFile {
+  absolutePath: string;
+  deepAgentsPath: string;
+}
+
 interface AutoContinueConfig {
   limit: number;
   allowScheduledTasks: boolean;
@@ -159,12 +188,43 @@ interface LoadedMcpToolSet {
   servers: ConfiguredMcpServer[];
 }
 
+interface PredefinedSubagentConfig {
+  name: string;
+  description: string;
+  systemPrompt: string;
+  tools: any[];
+  skills: string[];
+  model: ReturnType<typeof createChatModel>;
+}
+
 interface NormalizedMcpToolResult {
   text: string;
   structured?: string;
   isError: boolean;
   summary: string;
 }
+
+interface HumanInterruptActionRequest {
+  name: string;
+  args?: unknown;
+}
+
+interface HumanInterruptReviewConfig {
+  actionName: string;
+  allowedDecisions?: HumanDecisionType[];
+}
+
+interface PendingInterruptState {
+  createdAt: string;
+  sessionId: string;
+  checkpointId?: string;
+  interrupt: unknown;
+}
+
+type InterruptOnConfig = Record<
+  string,
+  boolean | { allowedDecisions: HumanDecisionType[] }
+>;
 
 const WORKSPACE_ROOT = '/workspace';
 const GROUP_ROOT = '/workspace/group';
@@ -176,6 +236,14 @@ const RUNTIME_CONTEXT_DIR = posixPath.join(RUNTIME_ROOT, 'runtime-context');
 const RUNTIME_CONTEXT_LATEST = posixPath.join(
   RUNTIME_CONTEXT_DIR,
   'latest.json',
+);
+const NATIVE_STREAM_DEBUG_PATH = posixPath.join(
+  RUNTIME_CONTEXT_DIR,
+  'native-stream-debug.jsonl',
+);
+const PENDING_INTERRUPT_PATH = posixPath.join(
+  RUNTIME_CONTEXT_DIR,
+  'pending-interrupt.json',
 );
 const WORKSPACE_MANIFEST_PATH = posixPath.join(
   RUNTIME_ROOT,
@@ -199,6 +267,11 @@ const QUERY_RECURSION_LIMIT = Math.max(
 
 const OUTPUT_START_MARKER = LEGACY_MARKERS.OUTPUT_START;
 const OUTPUT_END_MARKER = LEGACY_MARKERS.OUTPUT_END;
+const DEFAULT_ALLOWED_DECISIONS: HumanDecisionType[] = [
+  'approve',
+  'edit',
+  'reject',
+];
 
 // Global streaming output instance
 const streamingOutput = getStreamingOutput();
@@ -220,6 +293,68 @@ function writeOutput(output: ContainerOutput): void {
 
 function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
+}
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function formatErrorStack(error: unknown): string | undefined {
+  return error instanceof Error ? error.stack : undefined;
+}
+
+function shouldDebugNativeStreaming(): boolean {
+  return process.env.NANOCLAW_DEBUG_NATIVE_STREAM !== 'false';
+}
+
+function describeValueShape(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return {
+      kind: 'array',
+      length: value.length,
+      items: value.slice(0, 4).map((item) => describeValueShape(item)),
+    };
+  }
+
+  if (!value || typeof value !== 'object') {
+    return {
+      kind: typeof value,
+      value:
+        typeof value === 'string' && value.length > 200
+          ? `${value.slice(0, 200)}...`
+          : value,
+    };
+  }
+
+  const record = value as Record<string, unknown>;
+  return {
+    kind: 'object',
+    keys: Object.keys(record).slice(0, 20),
+    preview: Object.fromEntries(
+      Object.entries(record)
+        .slice(0, 8)
+        .map(([key, entryValue]) => [key, describeValueShape(entryValue)]),
+    ),
+  };
+}
+
+function appendNativeStreamDebug(entry: Record<string, unknown>): void {
+  if (!shouldDebugNativeStreaming()) return;
+
+  try {
+    fs.mkdirSync(RUNTIME_CONTEXT_DIR, { recursive: true });
+    fs.appendFileSync(
+      NATIVE_STREAM_DEBUG_PATH,
+      `${JSON.stringify({
+        timestamp: new Date().toISOString(),
+        ...entry,
+      })}\n`,
+    );
+  } catch (err) {
+    log(
+      `Failed to write native stream debug log: ${formatErrorMessage(err)}`,
+    );
+  }
 }
 
 async function readStdin(): Promise<string> {
@@ -277,6 +412,42 @@ function formatElapsed(elapsedMs: number): string {
 function parseBooleanFlag(value: string | undefined, defaultValue = false): boolean {
   if (!value) return defaultValue;
   return /^(?:1|true|yes|on)$/i.test(value.trim());
+}
+
+function safeJsonStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function safeParseMaybeJson(raw: unknown): unknown {
+  if (typeof raw !== 'string') return raw;
+
+  const trimmed = raw.trim();
+  if (!trimmed) return raw;
+  if (
+    (!trimmed.startsWith('{') || !trimmed.endsWith('}')) &&
+    (!trimmed.startsWith('[') || !trimmed.endsWith(']'))
+  ) {
+    return raw;
+  }
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return raw;
+  }
+}
+
+function truncateForHumanPrompt(value: unknown, maxLength = 1200): string {
+  const text =
+    typeof value === 'string' ? value.trim() : safeJsonStringify(value).trim();
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, maxLength - 3)}...`;
 }
 
 export function getAutoContinueConfig(
@@ -358,6 +529,194 @@ export function parseConfiguredMcpServers(
       }`,
     );
     return [];
+  }
+}
+
+let langGraphHumanInLoopPromise: Promise<{
+  Command?: new (args: { resume: unknown }) => unknown;
+  interrupt?: (value: unknown) => unknown;
+}> | null = null;
+
+async function loadLangGraphHumanInLoopHelpers(): Promise<{
+  Command?: new (args: { resume: unknown }) => unknown;
+  interrupt?: (value: unknown) => unknown;
+}> {
+  if (!langGraphHumanInLoopPromise) {
+    langGraphHumanInLoopPromise = import('@langchain/langgraph')
+      .then((mod) => {
+        const record = mod as Record<string, unknown>;
+        return {
+          Command:
+            typeof record.Command === 'function'
+              ? (record.Command as new (args: { resume: unknown }) => unknown)
+              : undefined,
+          interrupt:
+            typeof record.interrupt === 'function'
+              ? (record.interrupt as (value: unknown) => unknown)
+              : undefined,
+        };
+      })
+      .catch((err) => {
+        log(
+          `Failed to load @langchain/langgraph human-in-the-loop helpers: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        return {};
+      });
+  }
+
+  return langGraphHumanInLoopPromise;
+}
+
+async function createResumeCommandInput(resume: unknown): Promise<unknown> {
+  const helpers = await loadLangGraphHumanInLoopHelpers();
+  if (helpers.Command) {
+    return new helpers.Command({ resume });
+  }
+  return { resume };
+}
+
+async function requestHumanInterrupt(payload: unknown): Promise<unknown> {
+  const helpers = await loadLangGraphHumanInLoopHelpers();
+  if (!helpers.interrupt) {
+    throw new Error(
+      'DeepAgents human-in-the-loop interrupt() is unavailable in this runtime.',
+    );
+  }
+  return helpers.interrupt(payload);
+}
+
+function isHumanDecisionType(value: unknown): value is HumanDecisionType {
+  return value === 'approve' || value === 'edit' || value === 'reject';
+}
+
+function extractActionRequests(
+  interrupt: unknown,
+): HumanInterruptActionRequest[] {
+  if (!isRecord(interrupt) || !Array.isArray(interrupt.actionRequests)) {
+    return [];
+  }
+
+  return interrupt.actionRequests.flatMap((entry) => {
+    if (!isRecord(entry)) return [];
+    const name = getStringField(entry, 'name', 'actionName', 'tool');
+    if (!name) return [];
+    return [
+      {
+        name,
+        args: entry.args ?? entry.arguments ?? entry.input,
+      },
+    ];
+  });
+}
+
+function extractReviewConfigMap(
+  interrupt: unknown,
+): Map<string, HumanDecisionType[]> {
+  if (!isRecord(interrupt) || !Array.isArray(interrupt.reviewConfigs)) {
+    return new Map();
+  }
+
+  const configMap = new Map<string, HumanDecisionType[]>();
+  for (const entry of interrupt.reviewConfigs) {
+    if (!isRecord(entry)) continue;
+    const actionName = getStringField(entry, 'actionName', 'name', 'tool');
+    if (!actionName) continue;
+
+    const allowedDecisions = Array.isArray(entry.allowedDecisions)
+      ? entry.allowedDecisions.filter(isHumanDecisionType)
+      : DEFAULT_ALLOWED_DECISIONS;
+    configMap.set(actionName, allowedDecisions);
+  }
+
+  return configMap;
+}
+
+function writePendingInterruptState(state: PendingInterruptState): void {
+  fs.mkdirSync(RUNTIME_CONTEXT_DIR, { recursive: true });
+  fs.writeFileSync(
+    PENDING_INTERRUPT_PATH,
+    JSON.stringify(state, null, 2) + '\n',
+  );
+}
+
+function readPendingInterruptState(): PendingInterruptState | null {
+  try {
+    if (!fs.existsSync(PENDING_INTERRUPT_PATH)) return null;
+    const parsed = JSON.parse(
+      fs.readFileSync(PENDING_INTERRUPT_PATH, 'utf8'),
+    ) as unknown;
+    if (!isRecord(parsed) || typeof parsed.sessionId !== 'string') {
+      return null;
+    }
+    return {
+      createdAt:
+        typeof parsed.createdAt === 'string'
+          ? parsed.createdAt
+          : new Date().toISOString(),
+      sessionId: parsed.sessionId,
+      checkpointId:
+        typeof parsed.checkpointId === 'string'
+          ? parsed.checkpointId
+          : undefined,
+      interrupt: parsed.interrupt,
+    };
+  } catch (err) {
+    log(
+      `Failed to read pending interrupt state: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return null;
+  }
+}
+
+function clearPendingInterruptState(): void {
+  try {
+    fs.unlinkSync(PENDING_INTERRUPT_PATH);
+  } catch {
+    // ignore
+  }
+}
+
+export function parseInterruptOnConfig(
+  raw = process.env.NANOCLAW_INTERRUPT_ON_JSON,
+): InterruptOnConfig | undefined {
+  if (!raw?.trim()) return undefined;
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isRecord(parsed)) {
+      throw new Error('interruptOn config must be a JSON object.');
+    }
+
+    const config: InterruptOnConfig = {};
+    for (const [toolName, entry] of Object.entries(parsed)) {
+      if (typeof entry === 'boolean') {
+        config[toolName] = entry;
+        continue;
+      }
+      if (!isRecord(entry)) {
+        continue;
+      }
+      config[toolName] = {
+        allowedDecisions:
+          Array.isArray(entry.allowedDecisions) &&
+          entry.allowedDecisions.some(isHumanDecisionType)
+            ? entry.allowedDecisions.filter(isHumanDecisionType)
+            : [...DEFAULT_ALLOWED_DECISIONS],
+      };
+    }
+
+    return Object.keys(config).length > 0 ? config : undefined;
+  } catch (err) {
+    log(
+      `Failed to parse NANOCLAW_INTERRUPT_ON_JSON: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return undefined;
   }
 }
 
@@ -450,6 +809,15 @@ function ensureWorkspaceSkills(): string[] {
 
   // Deep Agents skill paths are relative to backend root (/workspace).
   return ['./group/.deepagents-skills/'];
+}
+
+export function getDeepAgentName(containerInput: ContainerInput): string {
+  const requestedName = containerInput.assistantName?.trim();
+  if (requestedName) {
+    return requestedName;
+  }
+
+  return containerInput.isMain ? 'nanoharness-main' : 'nanoharness-agent';
 }
 
 function extractTextContent(content: unknown): string {
@@ -568,6 +936,665 @@ function stripStructuredAssistantContent(text: string): string {
     .trim();
 }
 
+function extractTextFromRecordFields(record: AnyRecord): string {
+  const candidates = [
+    record.text,
+    record.output_text,
+    record.completion,
+    record.response,
+    record.delta,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+
+  if (Array.isArray(record.content)) {
+    const textParts = record.content
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        if (!item || typeof item !== 'object') return '';
+        const contentRecord = item as AnyRecord;
+        return [
+          contentRecord.text,
+          contentRecord.output_text,
+          contentRecord.delta,
+        ].find((value): value is string => typeof value === 'string') || '';
+      })
+      .filter((value) => value.trim());
+
+    if (textParts.length > 0) {
+      return textParts.join('').trim();
+    }
+  }
+
+  return '';
+}
+
+export function extractStreamChunkText(chunk: unknown): string {
+  const finalAssistantText = extractFinalAssistantText(chunk);
+  if (finalAssistantText) return finalAssistantText;
+
+  if (typeof chunk === 'string') return chunk.trim();
+  if (!chunk || typeof chunk !== 'object') return '';
+
+  return extractTextFromRecordFields(chunk as AnyRecord);
+}
+
+export function shouldUseNativeStreaming(agent: RuntimeAgent): boolean {
+  return (
+    process.env.NANOCLAW_USE_NATIVE_STREAMING === 'true' &&
+    typeof agent.stream === 'function'
+  );
+}
+
+function shouldEmitNativeStreamContent(): boolean {
+  return process.env.NANOCLAW_STREAM_CONTENT_FROM_NATIVE === 'true';
+}
+
+function shouldFallbackFromNativeStreaming(error: unknown): boolean {
+  if (process.env.NANOCLAW_DISABLE_NATIVE_STREAM_FALLBACK === 'true') {
+    return false;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  if (!message.trim()) return true;
+
+  // Do not retry via invoke() when the upstream model/provider itself failed.
+  // A second immediate request often repeats the same rate limit / provider error
+  // and can surface less useful secondary exceptions.
+  if (
+    /(429|rate limit|rate increased too quickly|provider returned error|upstream error|unauthorized|forbidden|quota|billing|overloaded|timeout)/i.test(
+      message,
+    )
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+interface NormalizedNativeStreamChunk {
+  namespace: string[];
+  mode: string;
+  data: unknown;
+  metadata?: unknown;
+}
+
+function isRecord(value: unknown): value is AnyRecord {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function getStringField(
+  record: AnyRecord,
+  ...keys: string[]
+): string | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function getNumberField(
+  record: AnyRecord,
+  ...keys: string[]
+): number | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function getNamespaceToolSegment(namespace: string[]): string | undefined {
+  return namespace.find((segment) => segment.startsWith('tools:'));
+}
+
+function inferNativeStreamMode(data: unknown): string {
+  if (Array.isArray(data)) {
+    const first = data[0];
+    if (isRecord(first)) {
+      if (
+        Array.isArray(first.tool_call_chunks) ||
+        typeof first.text === 'string' ||
+        typeof first.type === 'string' ||
+        Array.isArray(first.content)
+      ) {
+        return 'messages';
+      }
+    }
+  }
+
+  if (isRecord(data)) {
+    if (
+      getStringField(data, 'status', 'message', 'text', 'step') ||
+      getNumberField(data, 'progress', 'percent') !== undefined
+    ) {
+      return 'custom';
+    }
+    return 'updates';
+  }
+
+  return 'unknown';
+}
+
+export function normalizeNativeStreamChunk(
+  part: unknown,
+): NormalizedNativeStreamChunk {
+  if (Array.isArray(part)) {
+    if (
+      part.length >= 3 &&
+      Array.isArray(part[0]) &&
+      typeof part[1] === 'string'
+    ) {
+      return {
+        namespace: part[0].filter(
+          (segment): segment is string => typeof segment === 'string',
+        ),
+        mode: part[1],
+        data: part[2],
+      };
+    }
+
+    if (part.length >= 2 && Array.isArray(part[0])) {
+      const namespace = part[0].filter(
+        (segment): segment is string => typeof segment === 'string',
+      );
+      const data = part[1];
+      const metadata = Array.isArray(data) ? data[1] : undefined;
+      return {
+        namespace,
+        mode: inferNativeStreamMode(data),
+        data,
+        metadata,
+      };
+    }
+
+    if (part.length >= 2 && typeof part[0] === 'string') {
+      return {
+        namespace: [],
+        mode: part[0],
+        data: part[1],
+      };
+    }
+  }
+
+  return {
+    namespace: [],
+    mode: inferNativeStreamMode(part),
+    data: part,
+  };
+}
+
+function buildNativeToolEventKey(
+  namespace: string[],
+  payload: AnyRecord,
+  fallbackLabel: string,
+): string {
+  const toolSegment = getNamespaceToolSegment(namespace) || 'main';
+  const explicitId = getStringField(
+    payload,
+    'tool_call_id',
+    'toolCallId',
+    'id',
+    'call_id',
+    'callId',
+  );
+  const explicitIndex =
+    getNumberField(payload, 'index', 'chunk_index', 'chunkIndex') ?? 0;
+  const toolName =
+    getStringField(payload, 'name', 'tool', 'tool_name', 'toolName') ||
+    fallbackLabel ||
+    'tool';
+
+  return explicitId
+    ? `${toolSegment}:${explicitId}`
+    : `${toolSegment}:${toolName}:${explicitIndex}`;
+}
+
+function extractToolCompletionResult(message: AnyRecord): unknown {
+  if (message.content !== undefined) return message.content;
+  if (message.text !== undefined) return message.text;
+  return message;
+}
+
+function mapUpdatesChunkToBridgeEvents(
+  namespace: string[],
+  data: unknown,
+): NativeStreamBridgeEvent[] {
+  if (!isRecord(data)) return [];
+
+  const events: NativeStreamBridgeEvent[] = [];
+  const sourceLabel = getNamespaceToolSegment(namespace) || 'main';
+
+  for (const [nodeName, nodeData] of Object.entries(data)) {
+    events.push({
+      type: 'decision',
+      description:
+        namespace.length === 0
+          ? 'Native stream update'
+          : `Native subagent update (${sourceLabel})`,
+      choice: nodeName,
+    });
+
+    const nodeMessages = extractMessages(nodeData);
+    for (const message of nodeMessages) {
+      if (!isRecord(message)) continue;
+
+      const toolCalls = Array.isArray(message.tool_calls)
+        ? message.tool_calls
+        : [];
+      for (const toolCall of toolCalls) {
+        if (!isRecord(toolCall)) continue;
+        const name =
+          getStringField(toolCall, 'name', 'tool', 'tool_name') || 'tool';
+        events.push({
+          type: 'tool_start',
+          key: buildNativeToolEventKey(namespace, toolCall, name),
+          name,
+          input:
+            toolCall.args ??
+            toolCall.arguments ??
+            toolCall.input ??
+            toolCall.payload,
+          message: `Node ${nodeName} requested ${name}`,
+        });
+      }
+
+      const messageType = getStringField(message, 'type');
+      if (messageType === 'tool' || getStringField(message, 'tool_call_id')) {
+        const name =
+          getStringField(message, 'name', 'tool', 'tool_name') || 'tool';
+        events.push({
+          type: 'tool_complete',
+          key: buildNativeToolEventKey(namespace, message, name),
+          name,
+          result: extractToolCompletionResult(message),
+        });
+      }
+    }
+  }
+
+  return events;
+}
+
+function mapMessagesChunkToBridgeEvents(
+  namespace: string[],
+  data: unknown,
+): NativeStreamBridgeEvent[] {
+  if (!Array.isArray(data) || data.length === 0) return [];
+
+  const [message, metadata] = data;
+  const events: NativeStreamBridgeEvent[] = [];
+
+  if (isRecord(metadata)) {
+    const nodeName = getStringField(
+      metadata,
+      'langgraph_node',
+      'node',
+      'nodeName',
+    );
+    if (nodeName) {
+      events.push({
+        type: 'decision',
+        description:
+          namespace.length === 0
+            ? 'Native message stream'
+            : `Native subagent message (${getNamespaceToolSegment(namespace) || 'main'})`,
+        choice: nodeName,
+      });
+    }
+  }
+
+  if (!isRecord(message)) return events;
+
+  const toolCallChunks = Array.isArray(message.tool_call_chunks)
+    ? message.tool_call_chunks
+    : [];
+  for (const toolCallChunk of toolCallChunks) {
+    if (!isRecord(toolCallChunk)) continue;
+    const name =
+      getStringField(toolCallChunk, 'name', 'tool', 'tool_name') || 'tool';
+    const key = buildNativeToolEventKey(namespace, toolCallChunk, name);
+    const args = safeParseMaybeJson(
+      toolCallChunk.args ??
+        toolCallChunk.arguments ??
+        toolCallChunk.input ??
+        toolCallChunk.payload,
+    );
+
+    events.push({
+      type: 'tool_start',
+      key,
+      name,
+      input: args,
+      message: `Streaming tool call for ${name}`,
+    });
+
+    const rawArgs =
+      getStringField(toolCallChunk, 'args', 'arguments') ||
+      (args !== undefined && typeof args !== 'string'
+        ? JSON.stringify(args)
+        : undefined);
+    if (rawArgs) {
+      events.push({
+        type: 'tool_progress',
+        key,
+        name,
+        message: rawArgs,
+      });
+    }
+  }
+
+  const messageType = getStringField(message, 'type');
+  if (messageType === 'tool' || getStringField(message, 'tool_call_id')) {
+    const name =
+      getStringField(message, 'name', 'tool', 'tool_name') || 'tool';
+    events.push({
+      type: 'tool_complete',
+      key: buildNativeToolEventKey(namespace, message, name),
+      name,
+      result: extractToolCompletionResult(message),
+    });
+    return events;
+  }
+
+  const text = extractStreamChunkText(message);
+  if (text && toolCallChunks.length === 0) {
+    events.push({
+      type: 'content',
+      text,
+    });
+  }
+
+  return events;
+}
+
+function mapCustomChunkToBridgeEvents(
+  namespace: string[],
+  data: unknown,
+): NativeStreamBridgeEvent[] {
+  if (!isRecord(data)) return [];
+
+  const key = `${getNamespaceToolSegment(namespace) || 'main'}:custom`;
+  const message =
+    getStringField(data, 'status', 'message', 'text', 'step') ||
+    'Custom progress update';
+  const percent = getNumberField(data, 'progress', 'percent');
+
+  return [
+    {
+      type: 'tool_progress',
+      key,
+      name: getNamespaceToolSegment(namespace) || 'custom',
+      message,
+      percent,
+      result: data,
+    },
+  ];
+}
+
+export function mapNativeStreamChunkToBridgeEvents(
+  part: unknown,
+): NativeStreamBridgeEvent[] {
+  const normalized = normalizeNativeStreamChunk(part);
+
+  switch (normalized.mode) {
+    case 'updates':
+      return mapUpdatesChunkToBridgeEvents(
+        normalized.namespace,
+        normalized.data,
+      );
+    case 'messages':
+      return mapMessagesChunkToBridgeEvents(
+        normalized.namespace,
+        normalized.data,
+      );
+    case 'custom':
+      return mapCustomChunkToBridgeEvents(normalized.namespace, normalized.data);
+    default: {
+      const text = extractStreamChunkText(normalized.data);
+      return text
+        ? [
+            {
+              type: 'content',
+              text,
+            },
+          ]
+        : [];
+    }
+  }
+}
+
+async function consumeNativeAgentStream(
+  agent: RuntimeAgent,
+  invocationInput: unknown,
+  baseConfig: AnyRecord,
+): Promise<unknown> {
+  appendNativeStreamDebug({
+    type: 'stream_start',
+    config: {
+      threadId: (baseConfig.configurable as AnyRecord | undefined)?.thread_id,
+      checkpointId: (baseConfig.configurable as AnyRecord | undefined)
+        ?.checkpoint_id,
+      streamMode: ['updates', 'messages', 'custom'],
+      subgraphs: true,
+    },
+    invocationInputShape: describeValueShape(invocationInput),
+  });
+
+  let stream: AsyncIterable<unknown>;
+  try {
+    stream = await agent.stream!(
+      invocationInput,
+      {
+        ...baseConfig,
+        streamMode: ['updates', 'messages', 'custom'],
+        subgraphs: true,
+      },
+    );
+  } catch (err) {
+    appendNativeStreamDebug({
+      type: 'stream_open_error',
+      error: formatErrorMessage(err),
+      stack: formatErrorStack(err),
+    });
+    throw err;
+  }
+
+  let lastChunk: unknown = null;
+  let interruptChunk: unknown = null;
+  let lastEmittedText = '';
+  let bufferedMainAssistantText = '';
+  const decisionCache = new Set<string>();
+  const activeToolIds = new Map<string, string>();
+  let chunkCount = 0;
+
+  streamingOutput.decision('Native stream bridge', 'agent.stream enabled');
+
+  for await (const chunk of stream) {
+    chunkCount += 1;
+    lastChunk = chunk;
+
+    appendNativeStreamDebug({
+      type: 'chunk',
+      chunkIndex: chunkCount,
+      rawShape: describeValueShape(chunk),
+      raw: chunk,
+    });
+
+    try {
+      const directInterrupt = extractInterruptPayload(chunk);
+      if (directInterrupt) {
+        interruptChunk = {
+          __interrupt__: [{ value: directInterrupt }],
+        };
+      }
+
+      const normalizedChunk = normalizeNativeStreamChunk(chunk);
+      appendNativeStreamDebug({
+        type: 'normalized_chunk',
+        chunkIndex: chunkCount,
+        normalized: {
+          namespace: normalizedChunk.namespace,
+          mode: normalizedChunk.mode,
+          dataShape: describeValueShape(normalizedChunk.data),
+          metadataShape: describeValueShape(normalizedChunk.metadata),
+        },
+      });
+
+      const normalizedInterrupt = extractInterruptPayload(normalizedChunk.data);
+      if (normalizedInterrupt) {
+        interruptChunk = {
+          __interrupt__: [{ value: normalizedInterrupt }],
+        };
+      }
+      if (
+        normalizedChunk.mode === 'messages' &&
+        normalizedChunk.namespace.length === 0 &&
+        Array.isArray(normalizedChunk.data)
+      ) {
+        const [message] = normalizedChunk.data;
+        if (isRecord(message)) {
+          const hasToolCallChunks =
+            Array.isArray(message.tool_call_chunks) &&
+            message.tool_call_chunks.length > 0;
+          const text = extractStreamChunkText(message);
+          if (text && !hasToolCallChunks) {
+            bufferedMainAssistantText += text;
+          }
+        }
+      }
+
+      const bridgeEvents = mapNativeStreamChunkToBridgeEvents(chunk);
+      appendNativeStreamDebug({
+        type: 'bridge_events',
+        chunkIndex: chunkCount,
+        events: bridgeEvents,
+      });
+
+      for (const event of bridgeEvents) {
+        if (event.type === 'tool_start') {
+          const key = event.key || event.name || 'tool';
+          if (!activeToolIds.has(key)) {
+            const toolId = streamingOutput.toolStart(
+              event.name || 'tool',
+              event.input ?? {},
+            );
+            activeToolIds.set(key, toolId);
+          }
+          if (event.message) {
+            const toolId = activeToolIds.get(key);
+            if (toolId) {
+              streamingOutput.toolProgress(toolId, event.message, event.percent);
+            }
+          }
+          continue;
+        }
+
+        if (event.type === 'tool_progress') {
+          const key = event.key || event.name || 'tool';
+          if (!activeToolIds.has(key)) {
+            const toolId = streamingOutput.toolStart(
+              event.name || 'tool',
+              event.input ?? {},
+            );
+            activeToolIds.set(key, toolId);
+          }
+          const toolId = activeToolIds.get(key);
+          if (toolId) {
+            streamingOutput.toolProgress(
+              toolId,
+              event.message || 'In progress',
+              event.percent,
+            );
+          }
+          continue;
+        }
+
+        if (event.type === 'tool_complete') {
+          const key = event.key || event.name || 'tool';
+          if (!activeToolIds.has(key)) {
+            const toolId = streamingOutput.toolStart(
+              event.name || 'tool',
+              {},
+            );
+            activeToolIds.set(key, toolId);
+          }
+          const toolId = activeToolIds.get(key);
+          if (toolId) {
+            streamingOutput.toolComplete(toolId, event.result ?? {});
+            activeToolIds.delete(key);
+          }
+          continue;
+        }
+
+        if (event.type === 'decision') {
+          const description = event.description || 'Native stream event';
+          const choice = event.choice || 'update';
+          const decisionKey = `${description}::${choice}`;
+          if (!decisionCache.has(decisionKey)) {
+            decisionCache.add(decisionKey);
+            streamingOutput.decision(description, choice);
+          }
+          continue;
+        }
+
+        if (
+          event.type === 'content' &&
+          shouldEmitNativeStreamContent() &&
+          event.text &&
+          event.text !== lastEmittedText
+        ) {
+          streamingOutput.content(event.text);
+          lastEmittedText = event.text;
+        }
+      }
+    } catch (err) {
+      appendNativeStreamDebug({
+        type: 'chunk_processing_error',
+        chunkIndex: chunkCount,
+        error: formatErrorMessage(err),
+        stack: formatErrorStack(err),
+        rawShape: describeValueShape(chunk),
+        raw: chunk,
+      });
+      throw err;
+    }
+  }
+
+  appendNativeStreamDebug({
+    type: 'stream_complete',
+    chunkCount,
+    emittedTextLength: bufferedMainAssistantText.length,
+    lastChunkShape: describeValueShape(lastChunk),
+  });
+
+  if (interruptChunk) {
+    return interruptChunk;
+  }
+
+  if (bufferedMainAssistantText.trim()) {
+    return {
+      messages: [
+        {
+          role: 'assistant',
+          content: bufferedMainAssistantText,
+        },
+      ],
+    };
+  }
+
+  return lastChunk ?? lastEmittedText;
+}
+
 function looksLikeDelegationEnvelope(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
@@ -677,66 +1704,6 @@ function drainIpcInput(): string[] {
   }
 }
 
-function shouldAttemptNativeCompact(
-  prompt: string,
-  containerInput: ContainerInput,
-  sessionId: string | undefined,
-): boolean {
-  if (!containerInput.nativeCompact?.enabled) return false;
-  if (!sessionId) return false;
-  if (containerInput.nativeCompact.metadata?.compactMode !== 'native_llm') {
-    return false;
-  }
-  return prompt.length >= 12000;
-}
-
-async function attemptNativeCompact(
-  agent: { invoke: (input: unknown, config?: unknown) => Promise<unknown> },
-  sessionId: string,
-  prompt: string,
-  emitStatus: (text: string, replace?: boolean) => void,
-): Promise<NativeCompactOutcome> {
-  emitStatus('Context window nearing limit. Compacting with primary query model...', true);
-
-  const compactPrompt = [
-    'Compact the current conversation context for continued execution.',
-    'Preserve: primary user intent, constraints, important decisions, pending tasks, active files, errors/fixes, and immediate next step.',
-    'Drop verbose tool noise and repeated intermediate details.',
-    'Return a concise structured summary for continued work.',
-    '',
-    'Current prompt to preserve for continuation:',
-    prompt,
-  ].join('\n');
-
-  try {
-    await agent.invoke(
-      {
-        messages: [{ role: 'user', content: compactPrompt }],
-      },
-      {
-        configurable: { thread_id: sessionId },
-        recursionLimit: 40,
-      },
-    );
-
-    emitStatus('Primary-model compact completed. Continuing with compacted context...', true);
-    return {
-      attempted: true,
-      succeeded: true,
-      fallbackToRuleCompact: false,
-    };
-  } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
-    emitStatus('Primary-model compact failed. Falling back to host rule compaction...', true);
-    return {
-      attempted: true,
-      succeeded: false,
-      fallbackToRuleCompact: true,
-      reason,
-    };
-  }
-}
-
 function waitForIpcMessage(): Promise<string | null> {
   return new Promise((resolve) => {
     const poll = () => {
@@ -767,6 +1734,313 @@ function writeIpcFile(dir: string, data: object): string {
   fs.writeFileSync(tempPath, JSON.stringify(data, null, 2));
   fs.renameSync(tempPath, filePath);
   return filename;
+}
+
+function parsePositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+
+  const parsed = Number.parseInt(raw, 10);
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return parsed;
+}
+
+function getModelProvider(): ModelProvider {
+  return process.env.MODEL_PROVIDER === 'openai' ? 'openai' : 'anthropic';
+}
+
+function getPrimaryModelName(provider: ModelProvider): string {
+  if (provider === 'openai') {
+    return (
+      process.env.OPENAI_MODEL ||
+      process.env.CLAUDE_CODE_SUBAGENT_MODEL ||
+      'gpt-4.1'
+    );
+  }
+
+  return (
+    process.env.ANTHROPIC_MODEL ||
+    process.env.CLAUDE_CODE_SUBAGENT_MODEL ||
+    'claude-sonnet-4-5'
+  );
+}
+
+function getSummarizationModelName(
+  provider: ModelProvider,
+  primaryModelName: string,
+): string {
+  return (
+    process.env.NANOCLAW_SUMMARIZATION_MODEL ||
+    process.env.DEEPAGENTS_SUMMARIZATION_MODEL ||
+    primaryModelName
+  );
+}
+
+function createChatModel(provider: ModelProvider, modelName: string) {
+  if (provider === 'openai') {
+    return new ChatOpenAI({
+      model: modelName,
+      temperature: 0,
+      maxRetries: 2,
+    });
+  }
+
+  return new ChatAnthropic({
+    model: modelName,
+    temperature: 0,
+    maxRetries: 2,
+  });
+}
+
+async function loadDeepAgentsMiddleware(
+  provider: ModelProvider,
+  primaryModelName: string,
+): Promise<any[]> {
+  if (process.env.NANOCLAW_ENABLE_SUMMARIZATION === 'false') {
+    return [];
+  }
+
+  // DeepAgents already includes built-in summarization/offloading in its harness.
+  // Only inject LangChain's explicit SummarizationMiddleware when operators force
+  // it for compatibility experiments, otherwise duplicate middleware registration
+  // can crash startup.
+  if (process.env.NANOCLAW_FORCE_LANGCHAIN_SUMMARIZATION_MIDDLEWARE !== 'true') {
+    return [];
+  }
+
+  try {
+    const langchainModule = (await import('langchain')) as AnyRecord;
+    const summarizationOptions = {
+      model: createChatModel(
+        provider,
+        getSummarizationModelName(provider, primaryModelName),
+      ),
+      trigger: [
+        {
+          tokens: parsePositiveIntEnv(
+            'NANOCLAW_SUMMARIZATION_TRIGGER_TOKENS',
+            24000,
+          ),
+        },
+        {
+          messages: parsePositiveIntEnv(
+            'NANOCLAW_SUMMARIZATION_TRIGGER_MESSAGES',
+            40,
+          ),
+        },
+      ],
+      keep: {
+        messages: parsePositiveIntEnv(
+          'NANOCLAW_SUMMARIZATION_KEEP_MESSAGES',
+          12,
+        ),
+      },
+      trimTokensToSummarize: parsePositiveIntEnv(
+        'NANOCLAW_SUMMARIZATION_TRIM_TOKENS',
+        12000,
+      ),
+    };
+
+    const summarizationMiddlewareFactory =
+      langchainModule.summarizationMiddleware;
+    if (typeof summarizationMiddlewareFactory === 'function') {
+      return [summarizationMiddlewareFactory(summarizationOptions)];
+    }
+
+    const SummarizationMiddleware = langchainModule.SummarizationMiddleware;
+    if (typeof SummarizationMiddleware === 'function') {
+      return [new (SummarizationMiddleware as new (options: unknown) => unknown)(
+        summarizationOptions,
+      )];
+    }
+
+    log(
+      'LangChain summarization middleware export not found. Continuing with DeepAgents built-in summarization only.',
+    );
+    return [];
+  } catch (err) {
+    log(
+      `Failed to load optional LangChain summarization middleware: ${
+        err instanceof Error ? err.message : String(err)
+      }. Continuing with DeepAgents built-in summarization only.`,
+    );
+    return [];
+  }
+}
+
+function getSubagentModelName(
+  role: 'researcher' | 'coder' | 'reviewer',
+  primaryModelName: string,
+): string {
+  const overrideByRole = {
+    researcher:
+      process.env.NANOCLAW_SUBAGENT_RESEARCH_MODEL ||
+      process.env.NANOCLAW_RESEARCHER_MODEL,
+    coder:
+      process.env.NANOCLAW_SUBAGENT_CODER_MODEL ||
+      process.env.NANOCLAW_CODER_MODEL,
+    reviewer:
+      process.env.NANOCLAW_SUBAGENT_REVIEWER_MODEL ||
+      process.env.NANOCLAW_REVIEWER_MODEL,
+  } as const;
+
+  return overrideByRole[role] || primaryModelName;
+}
+
+function shouldEnablePredefinedSubagents(): boolean {
+  return process.env.NANOCLAW_ENABLE_PREDEFINED_SUBAGENTS !== 'false';
+}
+
+function shouldUseNativeMemory(): boolean {
+  return process.env.NANOCLAW_USE_NATIVE_MEMORY === 'true';
+}
+
+function parseEnvPathList(value: string | undefined): string[] {
+  if (!value?.trim()) return [];
+
+  return value
+    .split(/[\r\n,]+/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function getPredefinedSubagentSkills(
+  role: 'researcher' | 'coder' | 'reviewer',
+  mainSkills: string[],
+): string[] {
+  const shareMainSkills =
+    process.env.NANOCLAW_SUBAGENT_SHARE_MAIN_SKILLS === 'true';
+  const roleEnvName = {
+    researcher: 'NANOCLAW_SUBAGENT_RESEARCHER_SKILLS',
+    coder: 'NANOCLAW_SUBAGENT_CODER_SKILLS',
+    reviewer: 'NANOCLAW_SUBAGENT_REVIEWER_SKILLS',
+  }[role];
+  const roleSpecificSkills = parseEnvPathList(process.env[roleEnvName]);
+
+  const resolved = [
+    ...(shareMainSkills ? mainSkills : []),
+    ...roleSpecificSkills,
+  ];
+
+  return [...new Set(resolved)];
+}
+
+export function buildDelegationPolicyLines(): string[] {
+  if (!shouldEnablePredefinedSubagents()) {
+    return [
+      'Use task delegation only when extra context isolation is clearly helpful.',
+      'Prefer solving straightforward work in the main agent before delegating.',
+    ];
+  }
+
+  return [
+    'Available predefined subagents: researcher for investigation, coder for implementation, reviewer for findings-first review.',
+    'Use task delegation when specialized work or context isolation is helpful, but avoid unnecessary recursive delegation.',
+    'Delegate to researcher for codebase investigation or option comparison, coder for concrete implementation, and reviewer for regression-focused critique.',
+    'When delegating, prefer the exact task names researcher, coder, or reviewer before falling back to general-purpose delegation.',
+    'Prefer one focused subagent at a time unless the task clearly benefits from separation of concerns.',
+    'If the task is already small and clear in the current context, do it directly instead of delegating.',
+    'Do not re-delegate the same question repeatedly without incorporating the previous subagent result.',
+  ];
+}
+
+function filterSubagentTools(
+  tools: any[],
+  role: 'researcher' | 'coder' | 'reviewer',
+): any[] {
+  const readonlyMutationPattern =
+    /(write|edit|create|delete|schedule|send|update|cancel|pause|resume|register)/i;
+
+  return tools.filter((tool) => {
+    const name =
+      tool && typeof tool === 'object' && 'name' in tool
+        ? String((tool as { name?: unknown }).name || '')
+        : '';
+    if (name === '') {
+      return false;
+    }
+    if (name === 'mcp__nanoclaw__ask_user') {
+      return true;
+    }
+    if (name.startsWith('mcp__nanoclaw__')) {
+      return false;
+    }
+    if (role === 'coder') {
+      return true;
+    }
+    return !readonlyMutationPattern.test(name);
+  });
+}
+
+export function buildPredefinedSubagents(options: {
+  provider: ModelProvider;
+  primaryModelName: string;
+  skills: string[];
+  tools: any[];
+}): PredefinedSubagentConfig[] {
+  if (!shouldEnablePredefinedSubagents()) {
+    return [];
+  }
+
+  return [
+    {
+      name: 'researcher',
+      description:
+        'Investigates code, traces behavior, compares options, and returns concise findings before implementation.',
+      systemPrompt: [
+        'You are the researcher subagent inside NanoHarness.',
+        'Focus on understanding the codebase, tracing behavior, comparing approaches, and collecting evidence.',
+        'Prefer reading, searching, and targeted command output over editing files.',
+        'Use the exact task identity researcher when delegated by the parent agent.',
+        'Return concise findings, risks, and the most relevant next step for the parent agent.',
+      ].join(' '),
+      tools: filterSubagentTools(options.tools, 'researcher'),
+      skills: getPredefinedSubagentSkills('researcher', options.skills),
+      model: createChatModel(
+        options.provider,
+        getSubagentModelName('researcher', options.primaryModelName),
+      ),
+    },
+    {
+      name: 'coder',
+      description:
+        'Implements concrete code changes, keeps edits focused, and runs targeted verification when useful.',
+      systemPrompt: [
+        'You are the coder subagent inside NanoHarness.',
+        'Focus on making the smallest correct code changes that solve the assigned task.',
+        'Use files and shell tools pragmatically, keep scope tight, and run targeted verification when it materially reduces risk.',
+        'Use the exact task identity coder when delegated by the parent agent.',
+        'Return changed files, checks run, and any remaining risks to the parent agent.',
+      ].join(' '),
+      tools: filterSubagentTools(options.tools, 'coder'),
+      skills: getPredefinedSubagentSkills('coder', options.skills),
+      model: createChatModel(
+        options.provider,
+        getSubagentModelName('coder', options.primaryModelName),
+      ),
+    },
+    {
+      name: 'reviewer',
+      description:
+        'Reviews behavior, identifies regressions and missing tests, and returns findings-first feedback without implementation churn.',
+      systemPrompt: [
+        'You are the reviewer subagent inside NanoHarness.',
+        'Inspect proposed or completed changes for bugs, regressions, unsafe assumptions, and missing tests.',
+        'Do not make broad implementation changes unless the parent agent explicitly asks for them.',
+        'Use the exact task identity reviewer when delegated by the parent agent.',
+        'Return findings first, ordered by severity, then note residual risks or test gaps.',
+      ].join(' '),
+      tools: filterSubagentTools(options.tools, 'reviewer'),
+      skills: getPredefinedSubagentSkills('reviewer', options.skills),
+      model: createChatModel(
+        options.provider,
+        getSubagentModelName('reviewer', options.primaryModelName),
+      ),
+    },
+  ];
 }
 
 export function validateScheduleValue(
@@ -800,6 +2074,74 @@ export function validateScheduleValue(
   return null;
 }
 
+export function buildDeepAgentsMemoryPaths(
+  containerInput: Pick<ContainerInput, 'isMain'>,
+): string[] {
+  return resolveWorkspaceMemoryFiles(containerInput).map(
+    (entry) => entry.deepAgentsPath,
+  );
+}
+
+function resolveWorkspaceMemoryFiles(
+  containerInput: Pick<ContainerInput, 'isMain'>,
+): ResolvedWorkspaceMemoryFile[] {
+  const candidates: Array<{
+    absolutePath: string;
+    deepAgentsPath: string;
+  }> = [
+    {
+      absolutePath: posixPath.join(GROUP_ROOT, 'AGENTS.md'),
+      deepAgentsPath: './group/AGENTS.md',
+    },
+    {
+      absolutePath: posixPath.join(GROUP_ROOT, 'CLAUDE.md'),
+      deepAgentsPath: './group/CLAUDE.md',
+    },
+    {
+      absolutePath: posixPath.join(GLOBAL_ROOT, 'AGENTS.md'),
+      deepAgentsPath: './global/AGENTS.md',
+    },
+    {
+      absolutePath: posixPath.join(GLOBAL_ROOT, 'CLAUDE.md'),
+      deepAgentsPath: './global/CLAUDE.md',
+    },
+  ];
+
+  if (containerInput.isMain) {
+    candidates.push(
+      {
+        absolutePath: '/workspace/project/AGENTS.md',
+        deepAgentsPath: './project/AGENTS.md',
+      },
+      {
+        absolutePath: '/workspace/project/CLAUDE.md',
+        deepAgentsPath: './project/CLAUDE.md',
+      },
+    );
+  }
+
+  const resolvedByScope = new Map<string, ResolvedWorkspaceMemoryFile>();
+  for (const candidate of candidates) {
+    const scope = candidate.deepAgentsPath.split('/')[1];
+    if (resolvedByScope.has(scope)) continue;
+    if (!fs.existsSync(candidate.absolutePath)) continue;
+    resolvedByScope.set(scope, candidate);
+  }
+
+  return Array.from(resolvedByScope.values());
+}
+
+function getResolvedWorkspaceMemoryFile(
+  containerInput: Pick<ContainerInput, 'isMain'>,
+  scope: 'group' | 'global' | 'project',
+): ResolvedWorkspaceMemoryFile | null {
+  return (
+    resolveWorkspaceMemoryFiles(containerInput).find((entry) =>
+      entry.deepAgentsPath.startsWith(`./${scope}/`),
+    ) || null
+  );
+}
+
 export function buildRuntimePromptBundle(
   basePrompt: string,
   containerInput: ContainerInput,
@@ -818,18 +2160,10 @@ export function buildRuntimePromptBundle(
     `Prefer absolute output paths under ${REQUIRED_OUTPUT_ROOT} so artifacts never land outside the workspace by accident.`,
     'Treat /workspace/project, /workspace/global, and /workspace/extra as mounted input context unless the user explicitly asked to modify them.',
     `Workspace diagnostics are available at ${WORKSPACE_MANIFEST_PATH} and ${RUNTIME_CONTEXT_LATEST}.`,
-    'Deep Agents compatibility mapping for older Claude-style skills:',
-    '- Bash -> execute',
-    '- Read -> read_file',
-    '- Write -> write_file',
-    '- Edit -> edit_file',
-    '- Glob -> glob',
-    '- Grep -> grep',
-    '- Task -> task',
-    '- TodoWrite -> write_todos',
-    '- Generic MCP tools -> mcp__<server>__<tool>',
-    '- NanoClaw orchestration tools stay as mcp__nanoclaw__*',
-    'Prefer skill-guided workflows when a relevant skill is available.',
+    'Use generic MCP tools as mcp__<server>__<tool> when external integrations are available.',
+    'NanoHarness platform orchestration tools remain available as mcp__nanoclaw__* and should be used only for messaging, scheduling, and group management.',
+    'When progress depends on the user, use mcp__nanoclaw__ask_user to pause natively and wait for approval, confirmation, codes, or additional instructions.',
+    ...buildDelegationPolicyLines(),
     'Persist intermediate artifacts to disk for long workflows instead of emitting huge inline outputs.',
   ];
 
@@ -841,25 +2175,41 @@ export function buildRuntimePromptBundle(
 
   sections.push(runtimeInstructions.join('\n'));
 
-  const groupClaudePath = posixPath.join(GROUP_ROOT, 'CLAUDE.md');
-  const globalClaudePath = posixPath.join(GLOBAL_ROOT, 'CLAUDE.md');
-  const projectClaudePath = '/workspace/project/CLAUDE.md';
+  const useNativeMemory = shouldUseNativeMemory();
+  const groupMemoryFile = getResolvedWorkspaceMemoryFile(containerInput, 'group');
+  const globalMemoryFile = getResolvedWorkspaceMemoryFile(
+    containerInput,
+    'global',
+  );
+  const projectMemoryFile = getResolvedWorkspaceMemoryFile(
+    containerInput,
+    'project',
+  );
 
-  const groupClaude = readOptionalFile(groupClaudePath);
-  if (groupClaude) {
-    sections.push(`<group_memory>\n${groupClaude.trim()}\n</group_memory>`);
-  }
-
-  const globalClaude = readOptionalFile(globalClaudePath);
-  if (globalClaude) {
-    sections.push(`<global_memory>\n${globalClaude.trim()}\n</global_memory>`);
-  }
-
-  const projectClaude = containerInput.isMain
-    ? readOptionalFile(projectClaudePath)
+  const groupClaude = groupMemoryFile
+    ? readOptionalFile(groupMemoryFile.absolutePath)
     : null;
-  if (projectClaude) {
-    sections.push(`<project_memory>\n${projectClaude.trim()}\n</project_memory>`);
+  const globalClaude = globalMemoryFile
+    ? readOptionalFile(globalMemoryFile.absolutePath)
+    : null;
+  const projectClaude = projectMemoryFile
+    ? readOptionalFile(projectMemoryFile.absolutePath)
+    : null;
+
+  if (!useNativeMemory) {
+    if (groupClaude) {
+      sections.push(`<group_memory>\n${groupClaude.trim()}\n</group_memory>`);
+    }
+
+    if (globalClaude) {
+      sections.push(`<global_memory>\n${globalClaude.trim()}\n</global_memory>`);
+    }
+
+    if (projectClaude) {
+      sections.push(
+        `<project_memory>\n${projectClaude.trim()}\n</project_memory>`,
+      );
+    }
   }
 
   sections.push(basePrompt);
@@ -877,17 +2227,18 @@ export function buildRuntimePromptBundle(
       runtimeInstructions,
       memories: {
         group: {
-          path: groupClaudePath,
+          path: groupMemoryFile?.absolutePath || posixPath.join(GROUP_ROOT, 'AGENTS.md'),
           included: groupClaude !== null,
           content: groupClaude,
         },
         global: {
-          path: globalClaudePath,
+          path:
+            globalMemoryFile?.absolutePath || posixPath.join(GLOBAL_ROOT, 'AGENTS.md'),
           included: globalClaude !== null,
           content: globalClaude,
         },
         project: {
-          path: projectClaudePath,
+          path: projectMemoryFile?.absolutePath || '/workspace/project/AGENTS.md',
           included: projectClaude !== null,
           content: projectClaude,
         },
@@ -916,6 +2267,340 @@ function writeRuntimeContextSnapshot(snapshot: RuntimeContextSnapshot): void {
 
 function looksLikeMissingCheckpoint(errorMessage: string): boolean {
   return /checkpoint/i.test(errorMessage) && /(not found|missing|unknown)/i.test(errorMessage);
+}
+
+export function extractInterruptPayload(result: unknown): unknown | null {
+  const candidates: unknown[] = [];
+
+  if (isRecord(result)) {
+    candidates.push(result.__interrupt__);
+    if (isRecord(result.output)) {
+      candidates.push((result.output as AnyRecord).__interrupt__);
+    }
+  }
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate) || candidate.length === 0) continue;
+    const first = candidate[0];
+    if (isRecord(first) && 'value' in first) {
+      return first.value ?? null;
+    }
+    return first ?? null;
+  }
+
+  return null;
+}
+
+function getAllowedDecisionsForAction(
+  reviewConfigMap: Map<string, HumanDecisionType[]>,
+  actionName: string,
+): HumanDecisionType[] {
+  return reviewConfigMap.get(actionName) || DEFAULT_ALLOWED_DECISIONS;
+}
+
+function normalizeDecisionKeyword(message: string): HumanDecisionType | null {
+  const trimmed = message.trim();
+  if (/^(?:approve|approved|yes|y|ok|okay|continue)\b/i.test(trimmed)) {
+    return 'approve';
+  }
+  if (/^(?:reject|rejected|no|n|cancel|stop)\b/i.test(trimmed)) {
+    return 'reject';
+  }
+  if (/^edit\b/i.test(trimmed)) {
+    return 'edit';
+  }
+  return null;
+}
+
+function assertAllowedDecision(
+  decisionType: HumanDecisionType,
+  allowedDecisions: HumanDecisionType[],
+): void {
+  if (!allowedDecisions.includes(decisionType)) {
+    throw new Error(
+      `Decision "${decisionType}" is not allowed here. Allowed decisions: ${allowedDecisions.join(', ')}.`,
+    );
+  }
+}
+
+function normalizeDecisionRecord(
+  rawDecision: unknown,
+  actionRequest: HumanInterruptActionRequest,
+  allowedDecisions: HumanDecisionType[],
+): Record<string, unknown> {
+  if (typeof rawDecision === 'string') {
+    return parseDecisionLine(rawDecision, actionRequest, allowedDecisions);
+  }
+
+  if (!isRecord(rawDecision)) {
+    throw new Error('Each decision must be a string or object.');
+  }
+
+  const decisionType = getStringField(rawDecision, 'type');
+  if (!isHumanDecisionType(decisionType)) {
+    throw new Error('Decision object must include type approve, edit, or reject.');
+  }
+
+  assertAllowedDecision(decisionType, allowedDecisions);
+
+  if (decisionType !== 'edit') {
+    return { type: decisionType };
+  }
+
+  const editedAction = isRecord(rawDecision.editedAction)
+    ? rawDecision.editedAction
+    : rawDecision;
+  const editedName =
+    getStringField(editedAction, 'name') || actionRequest.name;
+  const editedArgs =
+    editedAction.args ??
+    editedAction.arguments ??
+    rawDecision.args ??
+    rawDecision.arguments;
+
+  if (editedArgs === undefined) {
+    throw new Error('Edit decisions must include replacement args.');
+  }
+
+  return {
+    type: 'edit',
+    editedAction: {
+      name: editedName,
+      args: editedArgs,
+    },
+  };
+}
+
+function parseDecisionLine(
+  line: string,
+  actionRequest: HumanInterruptActionRequest,
+  allowedDecisions: HumanDecisionType[],
+): Record<string, unknown> {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    throw new Error('Decision line cannot be empty.');
+  }
+
+  const decisionType = normalizeDecisionKeyword(trimmed);
+  if (!decisionType) {
+    throw new Error(
+      'Reply with approve/yes, reject/no, edit {json}, or a JSON decisions payload.',
+    );
+  }
+
+  assertAllowedDecision(decisionType, allowedDecisions);
+
+  if (decisionType !== 'edit') {
+    return { type: decisionType };
+  }
+
+  const editedArgsText = trimmed.replace(/^edit\b[:\s-]*/i, '').trim();
+  if (!editedArgsText) {
+    throw new Error('Edit decisions must include JSON arguments after "edit".');
+  }
+
+  const editedArgs = safeParseMaybeJson(editedArgsText);
+  if (typeof editedArgs === 'string') {
+    throw new Error('Edit decisions must include valid JSON arguments.');
+  }
+
+  return {
+    type: 'edit',
+    editedAction: {
+      name: actionRequest.name,
+      args: editedArgs,
+    },
+  };
+}
+
+export function formatHumanInLoopPrompt(interrupt: unknown): string {
+  const actionRequests = extractActionRequests(interrupt);
+  const reviewConfigMap = extractReviewConfigMap(interrupt);
+
+  if (actionRequests.length > 0) {
+    const actionLines = actionRequests.flatMap((actionRequest, index) => {
+      const allowedDecisions = getAllowedDecisionsForAction(
+        reviewConfigMap,
+        actionRequest.name,
+      );
+      return [
+        `${index + 1}. Tool: ${actionRequest.name}`,
+        `Arguments: ${truncateForHumanPrompt(actionRequest.args) || '{}'}`,
+        `Allowed decisions: ${allowedDecisions.join(', ')}`,
+      ];
+    });
+
+    const decisionHint =
+      actionRequests.length === 1
+        ? 'Reply with approve/yes, reject/no, or edit {"field":"value"}.'
+        : 'Reply with one decision per line in the same order, or JSON like {"decisions":[{"type":"approve"}, ...]}.';
+
+    return [
+      'Human review required before the agent can continue.',
+      '',
+      ...actionLines,
+      '',
+      decisionHint,
+    ].join('\n');
+  }
+
+  const details = isRecord(interrupt)
+    ? [
+        getStringField(interrupt, 'message'),
+        getStringField(interrupt, 'action'),
+        getStringField(interrupt, 'type'),
+      ].filter((value): value is string => typeof value === 'string')
+    : [];
+
+  return [
+    'The agent paused and is waiting for user input before it can continue.',
+    ...(details.length > 0 ? ['', ...details] : []),
+    '',
+    'Reply with yes/no, plain text, or JSON.',
+  ].join('\n');
+}
+
+function formatHumanInLoopResumeError(
+  error: unknown,
+  interrupt: unknown,
+): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return [
+    `Could not apply your reply: ${message}`,
+    '',
+    formatHumanInLoopPrompt(interrupt),
+  ].join('\n');
+}
+
+export function parseHumanInLoopResumeInput(
+  message: string,
+  interrupt: unknown,
+): unknown {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    throw new Error('User reply was empty.');
+  }
+
+  const actionRequests = extractActionRequests(interrupt);
+  if (actionRequests.length > 0) {
+    const reviewConfigMap = extractReviewConfigMap(interrupt);
+    const parsed = safeParseMaybeJson(trimmed);
+
+    if (Array.isArray(parsed)) {
+      if (parsed.length !== actionRequests.length) {
+        throw new Error(
+          `Expected ${actionRequests.length} decisions but got ${parsed.length}.`,
+        );
+      }
+      return {
+        decisions: parsed.map((entry, index) =>
+          normalizeDecisionRecord(
+            entry,
+            actionRequests[index],
+            getAllowedDecisionsForAction(
+              reviewConfigMap,
+              actionRequests[index].name,
+            ),
+          ),
+        ),
+      };
+    }
+
+    if (isRecord(parsed) && Array.isArray(parsed.decisions)) {
+      if (parsed.decisions.length !== actionRequests.length) {
+        throw new Error(
+          `Expected ${actionRequests.length} decisions but got ${parsed.decisions.length}.`,
+        );
+      }
+      return {
+        decisions: parsed.decisions.map((entry, index) =>
+          normalizeDecisionRecord(
+            entry,
+            actionRequests[index],
+            getAllowedDecisionsForAction(
+              reviewConfigMap,
+              actionRequests[index].name,
+            ),
+          ),
+        ),
+      };
+    }
+
+    if (isRecord(parsed) && typeof parsed.type === 'string') {
+      if (actionRequests.length !== 1) {
+        throw new Error(
+          'Provide one decision per line or a decisions array for multiple tool approvals.',
+        );
+      }
+      return {
+        decisions: [
+          normalizeDecisionRecord(
+            parsed,
+            actionRequests[0],
+            getAllowedDecisionsForAction(
+              reviewConfigMap,
+              actionRequests[0].name,
+            ),
+          ),
+        ],
+      };
+    }
+
+    const lines = trimmed
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (lines.length !== actionRequests.length) {
+      throw new Error(
+        `Expected ${actionRequests.length} decisions in order, one per line.`,
+      );
+    }
+
+    return {
+      decisions: lines.map((line, index) =>
+        parseDecisionLine(
+          line,
+          actionRequests[index],
+          getAllowedDecisionsForAction(
+            reviewConfigMap,
+            actionRequests[index].name,
+          ),
+        ),
+      ),
+    };
+  }
+
+  const parsed = safeParseMaybeJson(trimmed);
+  if (parsed !== trimmed) {
+    if (isRecord(parsed) && parsed.resume !== undefined) {
+      return parsed.resume;
+    }
+    return parsed;
+  }
+
+  if (/^(?:approve|approved|yes|y|ok|okay|continue)\b/i.test(trimmed)) {
+    return {
+      approved: true,
+      response: trimmed,
+      text: trimmed,
+      value: trimmed,
+    };
+  }
+
+  if (/^(?:reject|rejected|no|n|cancel|stop)\b/i.test(trimmed)) {
+    return {
+      approved: false,
+      response: trimmed,
+      text: trimmed,
+      value: trimmed,
+    };
+  }
+
+  return {
+    response: trimmed,
+    text: trimmed,
+    value: trimmed,
+  };
 }
 
 async function getLatestCheckpointId(
@@ -1129,7 +2814,7 @@ export async function loadConfiguredMcpTools(
       } satisfies StdioServerParameters);
       const stderrStream = transport.stderr;
       if (stderrStream) {
-        stderrStream.on('data', (chunk) => {
+        stderrStream.on('data', (chunk: Buffer | string) => {
           const text = chunk.toString().trim();
           if (text) log(`[mcp:${server.name}] ${text}`);
         });
@@ -1202,6 +2887,50 @@ export function createNanoClawTools(
   containerInput: ContainerInput,
   emitStatus: (text: string, replace?: boolean) => void,
 ) {
+  const askUserTool = tool(
+    async ({
+      question,
+      context,
+      expected_format,
+    }: {
+      question: string;
+      context?: string;
+      expected_format?: string;
+    }) => {
+      emitStatus(`mcp__nanoclaw__ask_user: ${question.slice(0, 120)}`);
+      const response = await requestHumanInterrupt({
+        type: 'nanoclaw_user_input',
+        question,
+        message: question,
+        context,
+        expectedFormat: expected_format,
+        chatJid: containerInput.chatJid,
+        groupFolder: containerInput.groupFolder,
+      });
+      return typeof response === 'string'
+        ? response
+        : safeJsonStringify(response);
+    },
+    {
+      name: 'mcp__nanoclaw__ask_user',
+      description:
+        'Pause execution and ask the user for approval, confirmation, or extra information. Use this when progress depends on user input such as yes/no confirmation, a CAPTCHA, a code, or additional instructions.',
+      schema: z.object({
+        question: z
+          .string()
+          .describe('What you need the user to answer right now.'),
+        context: z
+          .string()
+          .optional()
+          .describe('Optional short context explaining why the answer is needed.'),
+        expected_format: z
+          .string()
+          .optional()
+          .describe('Optional hint such as yes/no, JSON, code, OTP, or free text.'),
+      }),
+    },
+  );
+
   const sendMessageTool = tool(
     async ({
       text,
@@ -1500,6 +3229,7 @@ export function createNanoClawTools(
   );
 
   return [
+    askUserTool,
     sendMessageTool,
     scheduleTaskTool,
     listTasksTool,
@@ -1530,34 +3260,35 @@ async function buildAgent(
   const nanoClawTools = createNanoClawTools(containerInput, emitStatus);
   const mcpToolSet = await loadConfiguredMcpTools(emitStatus);
   const tools = [...nanoClawTools, ...mcpToolSet.tools] as typeof nanoClawTools;
-  const provider = process.env.MODEL_PROVIDER || 'anthropic';
-  const model =
-    provider === 'openai'
-      ? new ChatOpenAI({
-          model:
-            process.env.OPENAI_MODEL ||
-            process.env.CLAUDE_CODE_SUBAGENT_MODEL ||
-            'gpt-4.1',
-          temperature: 0,
-          maxRetries: 2,
-        })
-      : new ChatAnthropic({
-          model:
-            process.env.ANTHROPIC_MODEL ||
-            process.env.CLAUDE_CODE_SUBAGENT_MODEL ||
-            'claude-sonnet-4-5',
-          temperature: 0,
-          maxRetries: 2,
-        });
+  const provider = getModelProvider();
+  const primaryModelName = getPrimaryModelName(provider);
+  const model = createChatModel(provider, primaryModelName);
+  const middleware = await loadDeepAgentsMiddleware(provider, primaryModelName);
+  const subagents = buildPredefinedSubagents({
+    provider,
+    primaryModelName,
+    skills,
+    tools,
+  });
+  const interruptOn = parseInterruptOnConfig();
+  const memory = shouldUseNativeMemory()
+    ? buildDeepAgentsMemoryPaths(containerInput)
+    : undefined;
 
   const agent = (await createDeepAgent({
+    name: getDeepAgentName(containerInput),
     model,
     backend,
     tools,
     skills,
+    memory,
     checkpointer,
+    middleware,
+    subagents,
+    interruptOn,
   })) as unknown as {
     invoke: (input: unknown, config?: unknown) => Promise<unknown>;
+    stream?: (input: unknown, config?: unknown) => Promise<AsyncIterable<unknown>>;
   };
 
   return {
@@ -1568,15 +3299,17 @@ async function buildAgent(
 }
 
 async function runQuery(
-  agent: { invoke: (input: unknown, config?: unknown) => Promise<unknown> },
+  agent: RuntimeAgent,
   checkpointer: any,
   prompt: string,
   sessionId: string | undefined,
   containerInput: ContainerInput,
   resumeAt?: string,
   pendingIpcMessages: string[] = [],
+  pendingInterrupt?: PendingInterruptState | null,
 ): Promise<QueryRunResult> {
-  const nextSessionId = sessionId || crypto.randomUUID();
+  const nextSessionId =
+    pendingInterrupt?.sessionId || sessionId || crypto.randomUUID();
   let sawStatusEvent = false;
 
   const emitStatus = (text: string, replace = false) => {
@@ -1585,7 +3318,7 @@ async function runQuery(
       status: 'success',
       result: null,
       newSessionId: nextSessionId,
-      lastAssistantUuid: resumeAt,
+      lastAssistantUuid: pendingInterrupt?.checkpointId || resumeAt,
       event: {
         type: 'status',
         text,
@@ -1594,18 +3327,60 @@ async function runQuery(
     });
   };
 
-  emitStatus('Starting Deep Agents query...', true);
+  let invocationInput: unknown;
+  let shouldRetryFromLatest = false;
+  let checkpointTarget = resumeAt;
 
-  const { runtimePrompt, snapshot } = buildRuntimePromptBundle(
-    prompt,
-    containerInput,
-    {
-      sessionId: nextSessionId,
-      resumeAt,
-      pendingIpcMessages,
-    },
-  );
-  writeRuntimeContextSnapshot(snapshot);
+  if (pendingInterrupt) {
+    emitStatus('Resuming Deep Agents query from pending user input...', true);
+    try {
+      const resumePayload = parseHumanInLoopResumeInput(
+        prompt,
+        pendingInterrupt.interrupt,
+      );
+      invocationInput = await createResumeCommandInput(resumePayload);
+      checkpointTarget = undefined;
+      streamingOutput.decision('Human-in-the-loop', 'resuming');
+    } catch (err) {
+      const resumeErrorPrompt = formatHumanInLoopResumeError(
+        err,
+        pendingInterrupt.interrupt,
+      );
+      writeOutput({
+        status: 'success',
+        result: resumeErrorPrompt,
+        newSessionId: nextSessionId,
+        lastAssistantUuid: pendingInterrupt.checkpointId || resumeAt,
+      });
+      return {
+        newSessionId: nextSessionId,
+        lastAssistantUuid: pendingInterrupt.checkpointId || resumeAt,
+        closedDuringQuery: false,
+        lastAssistantText: resumeErrorPrompt,
+        lastResultText: resumeErrorPrompt,
+        lastResultSubtype: 'interrupt',
+        sawStatusEvent,
+      };
+    }
+  } else {
+    emitStatus('Starting Deep Agents query...', true);
+
+    const { runtimePrompt, snapshot } = buildRuntimePromptBundle(
+      prompt,
+      containerInput,
+      {
+        sessionId: nextSessionId,
+        resumeAt,
+        pendingIpcMessages,
+      },
+    );
+    writeRuntimeContextSnapshot(snapshot);
+    invocationInput = {
+      messages: [{ role: 'user', content: runtimePrompt }],
+    };
+    shouldRetryFromLatest = true;
+  }
+
   const baseConfig: AnyRecord = {
     configurable: {
       thread_id: nextSessionId,
@@ -1613,28 +3388,13 @@ async function runQuery(
     recursionLimit: QUERY_RECURSION_LIMIT,
   };
 
-  let nativeCompact: NativeCompactOutcome | undefined;
-  if (shouldAttemptNativeCompact(prompt, containerInput, nextSessionId)) {
-    nativeCompact = await attemptNativeCompact(
-      agent,
-      nextSessionId,
-      prompt,
-      emitStatus,
-    );
-  }
+  const invokeWithoutNativeStreaming = async (): Promise<unknown> =>
+    agent.invoke(invocationInput, baseConfig);
 
-  if (nativeCompact?.fallbackToRuleCompact) {
-    return {
-      newSessionId: nextSessionId,
-      lastAssistantUuid: resumeAt,
-      closedDuringQuery: false,
-      lastAssistantText: '',
-      lastResultText: null,
-      lastResultSubtype: 'compact_fallback',
-      sawStatusEvent,
-      nativeCompact,
-    };
-  }
+  const invokeWithCurrentMode = async (): Promise<unknown> =>
+    shouldUseNativeStreaming(agent)
+      ? await consumeNativeAgentStream(agent, invocationInput, baseConfig)
+      : await invokeWithoutNativeStreaming();
 
   let result: unknown;
   const queryStartedAt = Date.now();
@@ -1649,29 +3409,70 @@ async function runQuery(
   heartbeat.unref?.();
 
   try {
-    if (resumeAt) {
-      (baseConfig.configurable as AnyRecord).checkpoint_id = resumeAt;
+    if (checkpointTarget) {
+      (baseConfig.configurable as AnyRecord).checkpoint_id = checkpointTarget;
     }
-    result = await agent.invoke(
-      {
-        messages: [{ role: 'user', content: runtimePrompt }],
-      },
-      baseConfig,
-    );
+    try {
+      result = await invokeWithCurrentMode();
+    } catch (err) {
+      if (shouldUseNativeStreaming(agent) && shouldFallbackFromNativeStreaming(err)) {
+        const errorMessage = formatErrorMessage(err);
+        const errorStack = formatErrorStack(err);
+        log(
+          `Native streaming failed, falling back to invoke(): ${errorMessage}. Debug log: ${NATIVE_STREAM_DEBUG_PATH}`,
+        );
+        if (errorStack) {
+          log(`Native streaming stack:\n${errorStack}`);
+        }
+        emitStatus(
+          'Native streaming failed for this turn. Falling back to non-streaming invoke().',
+          true,
+        );
+        streamingOutput.decision(
+          'Native stream bridge',
+          'fallback to invoke',
+        );
+        result = await invokeWithoutNativeStreaming();
+      } else {
+        throw err;
+      }
+    }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
-    if (resumeAt && looksLikeMissingCheckpoint(errorMessage)) {
+    if (shouldRetryFromLatest && checkpointTarget && looksLikeMissingCheckpoint(errorMessage)) {
       emitStatus(
         'Stored checkpoint is invalid. Retrying from the latest thread state.',
         true,
       );
       delete (baseConfig.configurable as AnyRecord).checkpoint_id;
-      result = await agent.invoke(
-        {
-          messages: [{ role: 'user', content: runtimePrompt }],
-        },
-        baseConfig,
-      );
+      try {
+        result = await invokeWithCurrentMode();
+      } catch (retryErr) {
+        if (
+          shouldUseNativeStreaming(agent) &&
+          shouldFallbackFromNativeStreaming(retryErr)
+        ) {
+          const retryMessage = formatErrorMessage(retryErr);
+          const retryStack = formatErrorStack(retryErr);
+          log(
+            `Native streaming retry failed, falling back to invoke(): ${retryMessage}. Debug log: ${NATIVE_STREAM_DEBUG_PATH}`,
+          );
+          if (retryStack) {
+            log(`Native streaming retry stack:\n${retryStack}`);
+          }
+          emitStatus(
+            'Native streaming retry failed. Falling back to non-streaming invoke().',
+            true,
+          );
+          streamingOutput.decision(
+            'Native stream bridge',
+            'retry fallback to invoke',
+          );
+          result = await invokeWithoutNativeStreaming();
+        } else {
+          throw retryErr;
+        }
+      }
     } else {
       throw err;
     }
@@ -1679,9 +3480,44 @@ async function runQuery(
     clearInterval(heartbeat);
   }
 
-  const finalText = extractFinalAssistantText(result);
+  const interruptPayload = extractInterruptPayload(result);
   const checkpointId =
-    (await getLatestCheckpointId(checkpointer, nextSessionId)) || resumeAt;
+    (await getLatestCheckpointId(checkpointer, nextSessionId)) ||
+    pendingInterrupt?.checkpointId ||
+    resumeAt;
+
+  if (interruptPayload) {
+    const nextPendingInterrupt: PendingInterruptState = {
+      createdAt: new Date().toISOString(),
+      sessionId: nextSessionId,
+      checkpointId,
+      interrupt: interruptPayload,
+    };
+    writePendingInterruptState(nextPendingInterrupt);
+    streamingOutput.decision('Human-in-the-loop', 'waiting for user input');
+
+    const interruptPrompt = formatHumanInLoopPrompt(interruptPayload);
+    writeOutput({
+      status: 'success',
+      result: interruptPrompt,
+      newSessionId: nextSessionId,
+      lastAssistantUuid: checkpointId,
+    });
+
+    return {
+      newSessionId: nextSessionId,
+      lastAssistantUuid: checkpointId,
+      closedDuringQuery: false,
+      lastAssistantText: interruptPrompt,
+      lastResultText: interruptPrompt,
+      lastResultSubtype: 'interrupt',
+      sawStatusEvent,
+    };
+  }
+
+  clearPendingInterruptState();
+
+  const finalText = extractFinalAssistantText(result);
 
   if (finalText) {
     writeOutput({
@@ -1689,7 +3525,6 @@ async function runQuery(
       result: finalText,
       newSessionId: nextSessionId,
       lastAssistantUuid: checkpointId,
-      nativeCompact,
     });
   }
 
@@ -1701,7 +3536,6 @@ async function runQuery(
     lastResultText: finalText || null,
     lastResultSubtype: 'success',
     sawStatusEvent,
-    nativeCompact,
   };
 }
 
@@ -1763,15 +3597,21 @@ async function main(): Promise<void> {
     statusWriter,
   );
 
-  let sessionId = containerInput.sessionId;
-  let resumeAt = containerInput.resumeAt;
+  let pendingInterrupt = readPendingInterruptState();
+  let sessionId = pendingInterrupt?.sessionId || containerInput.sessionId;
+  let resumeAt =
+    pendingInterrupt?.checkpointId || containerInput.resumeAt;
   let prompt = containerInput.prompt;
   let pendingForQuery = drainIpcInput();
-  if (pendingForQuery.length > 0) {
+  if (pendingForQuery.length > 0 && !pendingInterrupt) {
     log(
       `Draining ${pendingForQuery.length} pending IPC messages into initial prompt`,
     );
     prompt += `\n${pendingForQuery.join('\n')}`;
+  }
+  if (pendingInterrupt && pendingForQuery.length > 0) {
+    prompt = [prompt, ...pendingForQuery].filter(Boolean).join('\n');
+    pendingForQuery = [];
   }
 
   let autoContinueCount = 0;
@@ -1792,6 +3632,7 @@ async function main(): Promise<void> {
         containerInput,
         resumeAt,
         pendingForQuery,
+        pendingInterrupt,
       );
 
       if (queryResult.newSessionId) {
@@ -1800,24 +3641,12 @@ async function main(): Promise<void> {
       if (queryResult.lastAssistantUuid) {
         resumeAt = queryResult.lastAssistantUuid;
       }
+      pendingInterrupt = readPendingInterruptState();
 
       if (queryResult.closedDuringQuery) {
         log('Close sentinel consumed during query, exiting');
         break;
       }
-
-      if (queryResult.nativeCompact?.fallbackToRuleCompact) {
-        writeOutput({
-          status: 'error',
-          result: null,
-          newSessionId: sessionId,
-          lastAssistantUuid: resumeAt,
-          error: queryResult.nativeCompact.reason || 'Native compact failed',
-          nativeCompact: queryResult.nativeCompact,
-        });
-        return;
-      }
-
 
       const autoContinueReason = getAutoContinueReason(
         queryResult,
@@ -1868,8 +3697,12 @@ async function main(): Promise<void> {
       autoContinueCount = 0;
     }
   } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : String(err);
+    const errorMessage = formatErrorMessage(err);
+    const errorStack = formatErrorStack(err);
     log(`Agent error: ${errorMessage}`);
+    if (errorStack) {
+      log(`Agent error stack:\n${errorStack}`);
+    }
     streamingOutput.error(errorMessage);
     streamingOutput.complete();
     writeOutput({
@@ -1894,8 +3727,12 @@ const isDirectRun =
 
 if (isDirectRun) {
   main().catch((err) => {
-    const errorMessage = err instanceof Error ? err.message : String(err);
+    const errorMessage = formatErrorMessage(err);
+    const errorStack = formatErrorStack(err);
     log(`Fatal startup error: ${errorMessage}`);
+    if (errorStack) {
+      log(`Fatal startup stack:\n${errorStack}`);
+    }
     streamingOutput.error(errorMessage);
     streamingOutput.complete();
     writeOutput({

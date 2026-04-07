@@ -47,6 +47,10 @@ async function loadRunner(provider: Provider, authMode: AuthMode) {
     GROUPS_DIR: '/tmp/nanoclaw-test-groups',
     IDLE_TIMEOUT: 1800000,
     MODEL_API_FORMAT: provider === 'openai' ? 'openai-responses' : 'anthropic',
+    NANOCLAW_DEBUG_NATIVE_STREAM: 'true',
+    NANOCLAW_DISABLE_NATIVE_STREAM_FALLBACK: undefined,
+    NANOCLAW_STREAM_CONTENT_FROM_NATIVE: 'true',
+    NANOCLAW_USE_NATIVE_STREAMING: 'true',
     OPENAI_MODEL: 'gpt-test-model',
     STREAMING_CONFIG: {
       ENABLED: true,
@@ -166,6 +170,9 @@ describe('container-runner provider env injection', () => {
       'ANTHROPIC_BASE_URL=http://host.docker.internal:3001',
     );
     expect(args).toContain('ANTHROPIC_API_KEY=placeholder');
+    expect(args).toContain('NANOCLAW_USE_NATIVE_STREAMING=true');
+    expect(args).toContain('NANOCLAW_STREAM_CONTENT_FROM_NATIVE=true');
+    expect(args).toContain('NANOCLAW_DEBUG_NATIVE_STREAM=true');
     expect(args).not.toContain(
       'OPENAI_BASE_URL=http://host.docker.internal:3001',
     );
@@ -202,6 +209,9 @@ describe('container-runner provider env injection', () => {
     expect(args).toContain('MODEL_API_FORMAT=openai-responses');
     expect(args).toContain('OPENAI_BASE_URL=http://host.docker.internal:3001');
     expect(args).toContain('OPENAI_API_KEY=placeholder');
+    expect(args).toContain('NANOCLAW_USE_NATIVE_STREAMING=true');
+    expect(args).toContain('NANOCLAW_STREAM_CONTENT_FROM_NATIVE=true');
+    expect(args).toContain('NANOCLAW_DEBUG_NATIVE_STREAM=true');
     expect(args).not.toContain(
       'ANTHROPIC_BASE_URL=http://host.docker.internal:3001',
     );

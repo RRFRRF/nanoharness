@@ -54,7 +54,6 @@ import {
   resolveGroupIpcPath,
 } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
-import { CompactMode } from './compact/native-compact.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   createNormalizedRunState,
@@ -689,70 +688,6 @@ async function runAgent(
           await channel?.handleStreamEvent?.(chatJid, event);
         },
       );
-
-      const nativeCompactFallback =
-        output.nativeCompact?.fallbackToRuleCompact === true;
-
-      if (nativeCompactFallback) {
-        logger.warn(
-          {
-            group: group.name,
-            sessionId,
-            error: output.nativeCompact?.reason || output.error,
-          },
-          'Primary-model compact failed, retrying once with host fallback compaction',
-        );
-
-        const fallbackPrompt = formatMessages(
-          getMessagesSince(
-            chatJid,
-            lastAgentTimestamp[chatJid] || '',
-            ASSISTANT_NAME,
-          ),
-          TIMEZONE,
-          sessionId,
-          true,
-        );
-
-        const fallbackOutput = await runContainerAgent(
-          group,
-          {
-            prompt: fallbackPrompt,
-            sessionId,
-            resumeAt,
-            groupFolder: group.folder,
-            chatJid,
-            isMain,
-            assistantName: ASSISTANT_NAME,
-            nativeCompact: {
-              enabled: true,
-              sessionId,
-              metadata: {
-                compactMode: CompactMode.FALLBACK_RULE,
-                requestedNativeCompact: true,
-              },
-            },
-          },
-          (proc, containerName) =>
-            queue.registerProcess(chatJid, proc, containerName, group.folder),
-          wrappedOnOutput,
-          async (event) => {
-            markNormalizedStreamEvent(normalizedAttempt, event);
-            const channel = findChannel(channels, chatJid);
-            await channel?.handleStreamEvent?.(chatJid, event);
-          },
-        );
-
-        if (fallbackOutput.status === 'error') {
-          logger.error(
-            { group: group.name, error: fallbackOutput.error },
-            'Fallback compact retry failed',
-          );
-          return 'error';
-        }
-
-        return 'success';
-      }
 
       if (output.status === 'error') {
         if (

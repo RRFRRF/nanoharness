@@ -20,12 +20,15 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   MODEL_API_FORMAT,
+  NANOCLAW_DEBUG_NATIVE_STREAM,
+  NANOCLAW_DISABLE_NATIVE_STREAM_FALLBACK,
+  NANOCLAW_STREAM_CONTENT_FROM_NATIVE,
+  NANOCLAW_USE_NATIVE_STREAMING,
   OPENAI_MODEL,
   STREAMING_CONFIG,
   TIMEZONE,
 } from './config.js';
 import {
-  CompactMode,
   type NativeCompactOutcome,
   type NativeCompactRequest,
 } from './compact/native-compact.js';
@@ -317,6 +320,16 @@ function buildContainerArgs(
     ['NANOCLAW_SHOW_TOOLS', process.env.NANOCLAW_SHOW_TOOLS],
     ['NANOCLAW_THINKING_COLLAPSED', process.env.NANOCLAW_THINKING_COLLAPSED],
     ['NANOCLAW_STREAM_BUFFER_SIZE', process.env.NANOCLAW_STREAM_BUFFER_SIZE],
+    ['NANOCLAW_USE_NATIVE_STREAMING', NANOCLAW_USE_NATIVE_STREAMING],
+    [
+      'NANOCLAW_STREAM_CONTENT_FROM_NATIVE',
+      NANOCLAW_STREAM_CONTENT_FROM_NATIVE,
+    ],
+    ['NANOCLAW_DEBUG_NATIVE_STREAM', NANOCLAW_DEBUG_NATIVE_STREAM],
+    [
+      'NANOCLAW_DISABLE_NATIVE_STREAM_FALLBACK',
+      NANOCLAW_DISABLE_NATIVE_STREAM_FALLBACK,
+    ],
   ] as const;
   for (const [key, value] of passthroughEnv) {
     if (value) args.push('-e', `${key}=${value}`);

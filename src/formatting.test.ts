@@ -111,7 +111,7 @@ describe('formatMessages', () => {
     expect(result).toContain('<messages>\n</messages>');
   });
 
-  it('does not emit compact metadata on native compact path before fallback', () => {
+  it('does not emit compact metadata during standard prompt formatting', () => {
     const result = formatMessages(
       [makeMsg({ content: 'x'.repeat(2000) })],
       TZ,

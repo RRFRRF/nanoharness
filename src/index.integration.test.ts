@@ -1,7 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { CompactMode } from './compact/native-compact.js';
-
 const state = vi.hoisted(() => {
   const sessions: Record<
     string,
@@ -121,15 +119,8 @@ vi.mock('./compact/index.js', () => ({ compactEngine: {} }));
 vi.mock('./router.js', () => ({
   findChannel: vi.fn(() => state.channel),
   formatMessages: vi.fn(
-    (
-      _messages: any[],
-      _timezone: string,
-      sessionId: string,
-      nativeCompactFailed?: boolean,
-    ) =>
-      nativeCompactFailed
-        ? `formatted:${sessionId}:fallback`
-        : `formatted:${sessionId}`,
+    (_messages: any[], _timezone: string, sessionId: string) =>
+      `formatted:${sessionId}`,
   ),
   formatOutbound: vi.fn(),
   escapeXml: vi.fn(),
@@ -285,7 +276,7 @@ describe('index orchestration integration', () => {
     expect(state.queue.notifyIdle).toHaveBeenCalledWith('local:1');
   });
 
-  it('completes in one pass when native compact path succeeds', async () => {
+  it('completes in one pass when summarization middleware path succeeds', async () => {
     state.db.getMessagesSince.mockReturnValue([
       {
         id: 'm1',
@@ -309,7 +300,7 @@ describe('index orchestration integration', () => {
 
         await onOutput({
           status: 'success',
-          result: 'native compact final answer',
+          result: 'summarized final answer',
           newSessionId: 'session-native-2',
           lastAssistantUuid: 'assistant-native-2',
         });
@@ -330,7 +321,7 @@ describe('index orchestration integration', () => {
     expect(state.channel.sendMessage).toHaveBeenCalledTimes(1);
     expect(state.channel.sendMessage).toHaveBeenCalledWith(
       'local:1',
-      'native compact final answer',
+      'summarized final answer',
     );
     expect(state.sessions['local-1']).toEqual({
       sessionId: 'session-native-2',
@@ -338,32 +329,33 @@ describe('index orchestration integration', () => {
     });
   });
 
-  it('stores fallback mode metadata used by the host retry path', () => {
-    __testInternals.upsertSessionState('local-1', {
-      sessionId: 'session-2',
-      resumeAt: null,
+  it('does not retry a host fallback run when legacy nativeCompact metadata is present', async () => {
+    state.db.getMessagesSince.mockReturnValue([
+      {
+        id: 'm1',
+        chat_jid: 'local:1',
+        sender: 'user',
+        sender_name: 'User',
+        content: 'please continue',
+        timestamp: '2026-04-02T01:00:00.000Z',
+        is_from_me: false,
+      },
+    ] as any);
+    state.containerRunner.runContainerAgent.mockResolvedValue({
+      status: 'error',
+      result: null,
+      error: 'legacy native compact marker',
+      nativeCompact: {
+        attempted: true,
+        succeeded: false,
+        fallbackToRuleCompact: true,
+        reason: 'legacy signal',
+      },
     });
 
-    const fallbackRequest = {
-      enabled: true,
-      sessionId: 'session-2',
-      metadata: {
-        compactMode: CompactMode.FALLBACK_RULE,
-        requestedNativeCompact: true,
-      },
-    };
+    const processed = await __testInternals.processGroupMessages('local:1');
 
-    expect(fallbackRequest).toEqual({
-      enabled: true,
-      sessionId: 'session-2',
-      metadata: {
-        compactMode: CompactMode.FALLBACK_RULE,
-        requestedNativeCompact: true,
-      },
-    });
-    expect(state.sessions['local-1']).toEqual({
-      sessionId: 'session-2',
-      resumeAt: null,
-    });
+    expect(processed).toBe(false);
+    expect(state.containerRunner.runContainerAgent).toHaveBeenCalledTimes(1);
   });
 });

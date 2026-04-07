@@ -1,9 +1,5 @@
 import type { CompactMessage, CompactResult } from './types.js';
-import {
-  applyFallbackCompaction,
-  preparePromptMessages,
-} from '../prompt-context.js';
-import { CompactMode } from './native-compact.js';
+import { preparePromptMessages } from '../prompt-context.js';
 
 export function buildCompactionHeader(result: CompactResult | null): string {
   if (!result) return '';
@@ -15,12 +11,6 @@ export function buildCompactionHeader(result: CompactResult | null): string {
 export function prepareMessagesForPrompt(
   messages: CompactMessage[],
   sessionId?: string,
-  nativeCompactFailed = false,
 ): ReturnType<typeof preparePromptMessages> {
-  if (nativeCompactFailed) {
-    return applyFallbackCompaction(messages, sessionId);
-  }
   return preparePromptMessages(messages, sessionId);
 }
-
-export { CompactMode };
