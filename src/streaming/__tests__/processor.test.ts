@@ -358,9 +358,9 @@ describe('StreamProcessor', () => {
       const flushed = processor.flush();
 
       expect(flushed.some((event) => event.type === 'error')).toBe(true);
-      expect(processor.getEvents().some((event) => event.type === 'error')).toBe(
-        true,
-      );
+      expect(
+        processor.getEvents().some((event) => event.type === 'error'),
+      ).toBe(true);
     });
 
     it('should clear all state', () => {

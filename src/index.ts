@@ -928,7 +928,9 @@ async function findAvailablePort(): Promise<number> {
       const address = server.address();
       if (!address || typeof address === 'string') {
         server.close();
-        reject(new Error('Failed to allocate an available credential proxy port'));
+        reject(
+          new Error('Failed to allocate an available credential proxy port'),
+        );
         return;
       }
       const port = address.port;
@@ -1084,19 +1086,20 @@ async function main(): Promise<void> {
   // Create and connect all registered channels.
   // Each channel self-registers via the barrel import above.
   // Factories return null when credentials are missing, so unconfigured channels are skipped.
-  if (!TERMINAL_TEST_MODE) for (const channelName of getRegisteredChannelNames()) {
-    const factory = getChannelFactory(channelName)!;
-    const channel = factory(channelOpts);
-    if (!channel) {
-      logger.warn(
-        { channel: channelName },
-        'Channel installed but credentials missing �?skipping. Check .env or re-run the channel skill.',
-      );
-      continue;
+  if (!TERMINAL_TEST_MODE)
+    for (const channelName of getRegisteredChannelNames()) {
+      const factory = getChannelFactory(channelName)!;
+      const channel = factory(channelOpts);
+      if (!channel) {
+        logger.warn(
+          { channel: channelName },
+          'Channel installed but credentials missing �?skipping. Check .env or re-run the channel skill.',
+        );
+        continue;
+      }
+      channels.push(channel);
+      await channel.connect();
     }
-    channels.push(channel);
-    await channel.connect();
-  }
 
   if (TERMINAL_MODE) {
     const terminalChannel = new TerminalChannel({

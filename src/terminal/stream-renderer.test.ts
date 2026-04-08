@@ -1,12 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import {
-  mapStreamEventToRenderItems,
-} from './stream-renderer.js';
-import {
-  resetStreamConfig,
-  setStreamConfig,
-} from './stream-commands.js';
+import { mapStreamEventToRenderItems } from './stream-renderer.js';
+import { resetStreamConfig, setStreamConfig } from './stream-commands.js';
 
 describe('mapStreamEventToRenderItems', () => {
   beforeEach(() => {

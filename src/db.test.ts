@@ -503,7 +503,9 @@ describe('registered group container config recovery', () => {
       .run('{bad json', 'group@g.us');
 
     expect(getRegisteredGroup('group@g.us')?.containerConfig).toBeUndefined();
-    expect(getAllRegisteredGroups()['group@g.us']?.containerConfig).toBeUndefined();
+    expect(
+      getAllRegisteredGroups()['group@g.us']?.containerConfig,
+    ).toBeUndefined();
   });
 });
 

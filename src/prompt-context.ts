@@ -11,9 +11,7 @@ export interface PreparedPromptMessages {
   nativeCompact: NativeCompactRequest;
 }
 
-function createNativeCompactRequest(
-  sessionId?: string,
-): NativeCompactRequest {
+function createNativeCompactRequest(sessionId?: string): NativeCompactRequest {
   const metadata: PromptPreparationMetadata = {
     compactMode: CompactMode.RULE,
     requestedNativeCompact: false,

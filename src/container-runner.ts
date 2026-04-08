@@ -119,11 +119,15 @@ function getQueryProgressTimeoutMs(): number {
 }
 
 function isStatusOutput(output: ContainerOutput): boolean {
-  return output.event?.type === 'status' && typeof output.event.text === 'string';
+  return (
+    output.event?.type === 'status' && typeof output.event.text === 'string'
+  );
 }
 
 function isQueryStartStatusOutput(output: ContainerOutput): boolean {
-  return isStatusOutput(output) && output.event!.text === QUERY_START_STATUS_TEXT;
+  return (
+    isStatusOutput(output) && output.event!.text === QUERY_START_STATUS_TEXT
+  );
 }
 
 function isHeartbeatStatusOutput(output: ContainerOutput): boolean {
@@ -167,7 +171,9 @@ function isTerminalTestMode(): boolean {
 }
 
 function extractLatestUserMessage(prompt: string): string {
-  const matches = [...prompt.matchAll(/<message\b[^>]*>([\s\S]*?)<\/message>/g)];
+  const matches = [
+    ...prompt.matchAll(/<message\b[^>]*>([\s\S]*?)<\/message>/g),
+  ];
   const raw = matches.at(-1)?.[1] || prompt;
   return raw
     .replace(/&lt;/g, '<')
@@ -484,21 +490,12 @@ function buildContainerArgs(
       NANOCLAW_SUBAGENT_RESEARCHER_SKILLS,
     ],
     ['NANOCLAW_SUBAGENT_CODER_SKILLS', NANOCLAW_SUBAGENT_CODER_SKILLS],
-    [
-      'NANOCLAW_SUBAGENT_REVIEWER_SKILLS',
-      NANOCLAW_SUBAGENT_REVIEWER_SKILLS,
-    ],
-    [
-      'NANOCLAW_SUBAGENT_RESEARCHER_MODEL',
-      NANOCLAW_SUBAGENT_RESEARCHER_MODEL,
-    ],
+    ['NANOCLAW_SUBAGENT_REVIEWER_SKILLS', NANOCLAW_SUBAGENT_REVIEWER_SKILLS],
+    ['NANOCLAW_SUBAGENT_RESEARCHER_MODEL', NANOCLAW_SUBAGENT_RESEARCHER_MODEL],
     ['NANOCLAW_RESEARCHER_MODEL', NANOCLAW_RESEARCHER_MODEL],
     ['NANOCLAW_SUBAGENT_CODER_MODEL', NANOCLAW_SUBAGENT_CODER_MODEL],
     ['NANOCLAW_CODER_MODEL', NANOCLAW_CODER_MODEL],
-    [
-      'NANOCLAW_SUBAGENT_REVIEWER_MODEL',
-      NANOCLAW_SUBAGENT_REVIEWER_MODEL,
-    ],
+    ['NANOCLAW_SUBAGENT_REVIEWER_MODEL', NANOCLAW_SUBAGENT_REVIEWER_MODEL],
     ['NANOCLAW_REVIEWER_MODEL', NANOCLAW_REVIEWER_MODEL],
     ['NANOCLAW_STREAMING', process.env.NANOCLAW_STREAMING],
     ['NANOCLAW_SHOW_THINKING', process.env.NANOCLAW_SHOW_THINKING],

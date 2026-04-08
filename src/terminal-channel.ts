@@ -546,10 +546,7 @@ export class TerminalChannel implements Channel {
     );
   }
 
-  private writePlainMessage(message: {
-    label: string;
-    text: string;
-  }): void {
+  private writePlainMessage(message: { label: string; text: string }): void {
     const lines = message.text.split(/\r?\n/);
     process.stdout.write(`${message.label}\n`);
     for (const line of lines) {
@@ -560,13 +557,13 @@ export class TerminalChannel implements Channel {
   private connectPlainMode(): void {
     if (this.plainReadline) return;
 
-    this.inkStore = ({
+    this.inkStore = {
       addMessage: (message: any) => this.writePlainMessage(message),
       completeMessage: (message: any) => this.writePlainMessage(message),
       flushLiveMessage: () => {},
       setContext: () => {},
       dispose: () => {},
-    } as unknown) as TerminalInkStore;
+    } as unknown as TerminalInkStore;
 
     this.inkStore.addMessage({
       id: `system-${Date.now()}`,
@@ -635,7 +632,11 @@ export class TerminalChannel implements Channel {
     const label = agent ? agent.name : jid;
     this.setTransientStatus(jid, 'running', 15000);
     const mergeJid = `${jid}:t${this.turnCounter}`;
-    const items = mapStreamEventToRenderItems(mergeJid, `agent:${label}`, event);
+    const items = mapStreamEventToRenderItems(
+      mergeJid,
+      `agent:${label}`,
+      event,
+    );
 
     for (const item of items) {
       this.inkStore?.addMessage({

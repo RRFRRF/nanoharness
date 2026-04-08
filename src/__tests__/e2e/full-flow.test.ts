@@ -166,7 +166,10 @@ describe('E2E: terminal full flow', () => {
         await waitForText('Switched to tester (local-tester)');
 
         sendLine('/send worker hi');
-        await waitForOccurrencesText('你好！我是 NanoHarness 终端测试助手。', 2);
+        await waitForOccurrencesText(
+          '你好！我是 NanoHarness 终端测试助手。',
+          2,
+        );
 
         sendLine('/delete worker');
         await waitForText('Deleted agent worker');
@@ -176,7 +179,9 @@ describe('E2E: terminal full flow', () => {
         expect(exitCode).toBe(0);
 
         const output = transcript();
-        expect(output).toContain('Terminal mode ready. Type /help for commands.');
+        expect(output).toContain(
+          'Terminal mode ready. Type /help for commands.',
+        );
         expect(output).toContain('Created agent tester (local-tester)');
         expect(output).toContain('苏州天气测试响应：多云，25°C，东南风 2 级。');
       } finally {

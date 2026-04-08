@@ -192,14 +192,20 @@ describe('container-runner provider env injection', () => {
     expect(args).toContain('NANOCLAW_ENABLE_PREDEFINED_SUBAGENTS=true');
     expect(args).toContain('NANOCLAW_USE_NATIVE_MEMORY=true');
     expect(args).toContain('NANOCLAW_INTERRUPT_ON_JSON={"write_file":true}');
-    expect(args).toContain('NANOCLAW_SUBAGENT_RESEARCHER_SKILLS=/skills/researcher');
+    expect(args).toContain(
+      'NANOCLAW_SUBAGENT_RESEARCHER_SKILLS=/skills/researcher',
+    );
     expect(args).toContain('NANOCLAW_SUBAGENT_CODER_SKILLS=/skills/coder');
-    expect(args).toContain('NANOCLAW_SUBAGENT_REVIEWER_SKILLS=/skills/reviewer');
+    expect(args).toContain(
+      'NANOCLAW_SUBAGENT_REVIEWER_SKILLS=/skills/reviewer',
+    );
     expect(args).toContain('NANOCLAW_SUBAGENT_SHARE_MAIN_SKILLS=true');
     expect(args).toContain(
       'NANOCLAW_SUBAGENT_RESEARCHER_MODEL=researcher-subagent-model',
     );
-    expect(args).toContain('NANOCLAW_SUBAGENT_CODER_MODEL=coder-subagent-model');
+    expect(args).toContain(
+      'NANOCLAW_SUBAGENT_CODER_MODEL=coder-subagent-model',
+    );
     expect(args).toContain(
       'NANOCLAW_SUBAGENT_REVIEWER_MODEL=reviewer-subagent-model',
     );
@@ -245,14 +251,20 @@ describe('container-runner provider env injection', () => {
     expect(args).toContain('NANOCLAW_ENABLE_PREDEFINED_SUBAGENTS=true');
     expect(args).toContain('NANOCLAW_USE_NATIVE_MEMORY=true');
     expect(args).toContain('NANOCLAW_INTERRUPT_ON_JSON={"write_file":true}');
-    expect(args).toContain('NANOCLAW_SUBAGENT_RESEARCHER_SKILLS=/skills/researcher');
+    expect(args).toContain(
+      'NANOCLAW_SUBAGENT_RESEARCHER_SKILLS=/skills/researcher',
+    );
     expect(args).toContain('NANOCLAW_SUBAGENT_CODER_SKILLS=/skills/coder');
-    expect(args).toContain('NANOCLAW_SUBAGENT_REVIEWER_SKILLS=/skills/reviewer');
+    expect(args).toContain(
+      'NANOCLAW_SUBAGENT_REVIEWER_SKILLS=/skills/reviewer',
+    );
     expect(args).toContain('NANOCLAW_SUBAGENT_SHARE_MAIN_SKILLS=true');
     expect(args).toContain(
       'NANOCLAW_SUBAGENT_RESEARCHER_MODEL=researcher-subagent-model',
     );
-    expect(args).toContain('NANOCLAW_SUBAGENT_CODER_MODEL=coder-subagent-model');
+    expect(args).toContain(
+      'NANOCLAW_SUBAGENT_CODER_MODEL=coder-subagent-model',
+    );
     expect(args).toContain(
       'NANOCLAW_SUBAGENT_REVIEWER_MODEL=reviewer-subagent-model',
     );

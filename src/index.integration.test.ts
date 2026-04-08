@@ -400,8 +400,7 @@ describe('index orchestration integration', () => {
       .mockRejectedValueOnce(error)
       .mockResolvedValueOnce({ close } as any);
 
-    const server =
-      await __testInternals.startCredentialProxyWithFallback(3001);
+    const server = await __testInternals.startCredentialProxyWithFallback(3001);
 
     expect(startCredentialProxy).toHaveBeenCalledTimes(2);
     expect(startCredentialProxy).toHaveBeenNthCalledWith(1, 3001, '127.0.0.1');
@@ -428,7 +427,13 @@ describe('index orchestration integration', () => {
       },
     ] as any);
     state.transientRetry.mockImplementation(
-      ({ attempt, maxAttempts, error, sentVisibleResult, observedCompletion }) =>
+      ({
+        attempt,
+        maxAttempts,
+        error,
+        sentVisibleResult,
+        observedCompletion,
+      }) =>
         attempt < maxAttempts &&
         !sentVisibleResult &&
         !observedCompletion &&

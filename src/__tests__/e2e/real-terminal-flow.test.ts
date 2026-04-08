@@ -115,7 +115,10 @@ describe('E2E: real terminal flow', () => {
         'OPENAI_API_KEY',
         'OPENAI_MODEL',
       ]) {
-        expect(process.env[key], `${key} is required for real e2e`).toBeTruthy();
+        expect(
+          process.env[key],
+          `${key} is required for real e2e`,
+        ).toBeTruthy();
       }
 
       const proxyPort = await reserveFreePort();
@@ -153,11 +156,15 @@ describe('E2E: real terminal flow', () => {
         expectedCount: number,
         timeoutMs = 180000,
       ) => {
-        await waitForCondition(() => {
-          const output = transcript();
-          const matches = output.match(new RegExp(`^${label}$`, 'gm'));
-          return (matches?.length || 0) >= expectedCount;
-        }, timeoutMs, `${label} ${expectedCount} times`);
+        await waitForCondition(
+          () => {
+            const output = transcript();
+            const matches = output.match(new RegExp(`^${label}$`, 'gm'));
+            return (matches?.length || 0) >= expectedCount;
+          },
+          timeoutMs,
+          `${label} ${expectedCount} times`,
+        );
       };
       const waitForExit = () =>
         new Promise<number | null>((resolve) => {
@@ -168,7 +175,10 @@ describe('E2E: real terminal flow', () => {
       child.stderr?.on('data', (chunk) => stderrChunks.push(chunk.toString()));
 
       try {
-        await waitForText('Terminal mode ready. Type /help for commands.', 60000);
+        await waitForText(
+          'Terminal mode ready. Type /help for commands.',
+          60000,
+        );
 
         sendLine('/help');
         await waitForText('/new <name> [--mount <path>] [--rw]');

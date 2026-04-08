@@ -322,7 +322,10 @@ export class StreamParser {
 
     const jsonStr = this.buffer.slice(jsonStart, jsonEnd);
     let endPos = jsonEnd;
-    while (endPos < this.buffer.length && /\s/.test(this.buffer[endPos] || '')) {
+    while (
+      endPos < this.buffer.length &&
+      /\s/.test(this.buffer[endPos] || '')
+    ) {
       endPos += 1;
     }
 
