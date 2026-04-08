@@ -1330,22 +1330,7 @@ function mapMessagesChunkToBridgeEvents(
       key,
       name,
       input: args,
-      message: `Streaming tool call for ${name}`,
     });
-
-    const rawArgs =
-      getStringField(toolCallChunk, 'args', 'arguments') ||
-      (args !== undefined && typeof args !== 'string'
-        ? JSON.stringify(args)
-        : undefined);
-    if (rawArgs) {
-      events.push({
-        type: 'tool_progress',
-        key,
-        name,
-        message: rawArgs,
-      });
-    }
   }
 
   const messageType = getStringField(message, 'type');

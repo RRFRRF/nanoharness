@@ -349,9 +349,7 @@ describe('agent runner runtime diagnostics', () => {
         data: unknown;
         metadata?: unknown;
       };
-      mapNativeStreamChunkToBridgeEvents: (
-        part: unknown,
-      ) => Array<{
+      mapNativeStreamChunkToBridgeEvents: (part: unknown) => Array<{
         type: string;
         key?: string;
         name?: string;
@@ -464,10 +462,7 @@ describe('agent runner runtime diagnostics', () => {
       mod.buildDeepAgentsMemoryPaths({
         isMain: true,
       }),
-    ).toEqual([
-      './group/CLAUDE.md',
-      './project/CLAUDE.md',
-    ]);
+    ).toEqual(['./group/CLAUDE.md', './project/CLAUDE.md']);
 
     process.env.NANOCLAW_USE_NATIVE_MEMORY = 'true';
 
@@ -500,10 +495,7 @@ describe('agent runner runtime diagnostics', () => {
       mod.buildDeepAgentsMemoryPaths({
         isMain: true,
       }),
-    ).toEqual([
-      './group/AGENTS.md',
-      './project/AGENTS.md',
-    ]);
+    ).toEqual(['./group/AGENTS.md', './project/AGENTS.md']);
 
     const bundle = mod.buildRuntimePromptBundle(
       '<messages>\n<message sender="user">test</message>\n</messages>',
@@ -520,7 +512,9 @@ describe('agent runner runtime diagnostics', () => {
 
     expect(bundle.runtimePrompt).toContain('group agents memory');
     expect(bundle.runtimePrompt).toContain('project agents memory');
-    expect(bundle.snapshot.memories.group.path).toBe('/workspace/group/AGENTS.md');
+    expect(bundle.snapshot.memories.group.path).toBe(
+      '/workspace/group/AGENTS.md',
+    );
     expect(bundle.snapshot.memories.project.path).toBe(
       '/workspace/project/AGENTS.md',
     );
@@ -841,9 +835,9 @@ describe('agent runner runtime diagnostics', () => {
 
     expect(mod.isNativeMainAssistantNamespace([])).toBe(true);
     expect(mod.isNativeMainAssistantNamespace(['model_request'])).toBe(true);
-    expect(
-      mod.isNativeMainAssistantNamespace(['tools:call_abc123']),
-    ).toBe(false);
+    expect(mod.isNativeMainAssistantNamespace(['tools:call_abc123'])).toBe(
+      false,
+    );
   });
 
   it('renders MCP tool results from text, links, and structured content', async () => {
@@ -1110,8 +1104,12 @@ describe('agent runner runtime diagnostics', () => {
       tools: [{ name: 'mcp__docs__lookup' }],
     });
 
-    expect(subagents[0].skills).toEqual(['/workspace/group/.deepagents-skills']);
-    expect(subagents[1].skills).toEqual(['/workspace/group/.deepagents-skills']);
+    expect(subagents[0].skills).toEqual([
+      '/workspace/group/.deepagents-skills',
+    ]);
+    expect(subagents[1].skills).toEqual([
+      '/workspace/group/.deepagents-skills',
+    ]);
     expect(subagents[2].skills).toEqual([
       '/workspace/group/.deepagents-skills',
       '/skills/reviewer',
@@ -1310,12 +1308,10 @@ describe('agent runner runtime diagnostics', () => {
           name: 'grep',
           input: { pattern: 'TODO' },
         }),
-        expect.objectContaining({
-          type: 'tool_progress',
-          key: 'tools:call_abc123:tool_1',
-          message: '{"pattern":"TODO"}',
-        }),
       ]),
+    );
+    expect(toolEvents.some((event) => event.type === 'tool_progress')).toBe(
+      false,
     );
 
     const contentEvents = mod.mapNativeStreamChunkToBridgeEvents([
@@ -1460,7 +1456,6 @@ describe('agent runner runtime diagnostics', () => {
     });
   });
 
-
   it('keeps repeated native content chunks instead of deduping equal text', async () => {
     const mod = await loadRuntimeModule();
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -1478,18 +1473,12 @@ describe('agent runner runtime diagnostics', () => {
                 yield [
                   [],
                   'messages',
-                  [
-                    { text: '你好' },
-                    { langgraph_node: 'model_request' },
-                  ],
+                  [{ text: '你好' }, { langgraph_node: 'model_request' }],
                 ];
                 yield [
                   [],
                   'messages',
-                  [
-                    { text: '你好' },
-                    { langgraph_node: 'model_request' },
-                  ],
+                  [{ text: '你好' }, { langgraph_node: 'model_request' }],
                 ];
               },
             }) as AsyncIterable<unknown>,
@@ -1531,10 +1520,7 @@ describe('agent runner runtime diagnostics', () => {
                 yield [
                   [],
                   'messages',
-                  [
-                    { text: 'A' },
-                    { langgraph_node: 'model_request' },
-                  ],
+                  [{ text: 'A' }, { langgraph_node: 'model_request' }],
                 ];
               },
             }) as AsyncIterable<unknown>,
